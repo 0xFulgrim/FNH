@@ -21,7 +21,7 @@ from .executor import (
 )
 from .feed import FileFeed
 from .inventory import FileInventory
-from .osv import OSVFeed, packages_from_inventory
+from .osv import OSVCache, OSVFeed, packages_from_inventory
 from .pipeline import Pipeline
 from .planner import MitigationLibrary, Planner
 from .recommend import summarize
@@ -36,7 +36,8 @@ def build_pipeline(args: argparse.Namespace) -> Pipeline:
         # Watch exactly the packages we actually run. OSV returns their known
         # advisories; our matcher then applies version ranges to the inventory.
         packages = packages_from_inventory(inventory.assets())
-        feed = OSVFeed(packages)
+        cache = OSVCache(args.cache) if args.cache else None
+        feed = OSVFeed(packages, cache=cache, batch=not args.no_batch)
     else:
         feed = FileFeed(args.advisories)
     planner = Planner(MitigationLibrary(args.mitigations))
@@ -66,6 +67,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     run.add_argument("--advisories", default=str(EXAMPLES / "advisories.json"))
     run.add_argument("--inventory", default=str(EXAMPLES / "inventory.json"))
+    run.add_argument(
+        "--cache",
+        default=None,
+        help="path to an OSV record cache file (osv source only)",
+    )
+    run.add_argument(
+        "--no-batch",
+        action="store_true",
+        help="use one /v1/query per package instead of the batch endpoint",
+    )
     run.add_argument("--mitigations", default=str(EXAMPLES / "mitigations.json"))
     run.add_argument("--dry-run", action="store_true", help="never execute commands")
     run.add_argument(

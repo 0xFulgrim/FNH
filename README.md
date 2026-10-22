@@ -40,6 +40,9 @@ python -m vulnpilot run --dry-run
 
 # Live advisories from osv.dev for the packages in your inventory.
 python -m vulnpilot run --source osv --dry-run
+
+# ...with an on-disk cache so repeat runs skip unchanged records.
+python -m vulnpilot run --source osv --cache .osv-cache.json --dry-run
 ```
 
 The offline run shows three outcomes: a patch applied+validated, a mitigation
@@ -51,15 +54,21 @@ recommendations.
 `vulnpilot/osv.py` queries [osv.dev](https://osv.dev) — a free, no-auth
 database aggregating GHSA, PyPA, RustSec, Debian, and more. It:
 
-- queries OSV once per package in your inventory (ecosystems are mapped,
-  e.g. `pypi` → `PyPI`; unmappable ones like a generic `os` are skipped);
+- discovers advisories for all inventory packages in **one batch request**
+  (`/v1/querybatch`), following OSV pagination for packages with many CVEs;
+- fetches each full record from `/v1/vulns/{id}`, served from an optional
+  **on-disk cache** (`--cache`) keyed on the record's `modified` timestamp, so
+  repeat runs only re-fetch advisories that actually changed;
+- maps ecosystems (e.g. `pypi` → `PyPI`; unmappable ones like a generic `os`
+  are skipped);
 - converts OSV `introduced`/`fixed`/`last_affected` ranges into the matcher's
   constraint strings, and computes a CVSS base score from the vector
   (`vulnpilot/cvss.py`);
 - leaves version-range matching to our own `Matcher`, so the same logic drives
   both the file and OSV sources.
 
-Zero third-party dependencies (stdlib `urllib`). The HTTP transport is
+`--no-batch` falls back to one `/v1/query` per package (full records, no batch).
+Zero third-party dependencies (stdlib `urllib`). Both HTTP transports are
 injectable, so tests and dry-runs never hit the network.
 
 > **Network note:** a live OSV fetch needs outbound access to `api.osv.dev`.

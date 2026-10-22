@@ -2,6 +2,7 @@ from vulnpilot.cvss import base_score
 from vulnpilot.matcher import Matcher
 from vulnpilot.models import Asset
 from vulnpilot.osv import (
+    OSVCache,
     OSVFeed,
     packages_from_inventory,
     parse_osv_record,
@@ -63,17 +64,31 @@ def test_parse_osv_record():
     assert adv.affected == [{"ecosystem": "pypi", "name": "requests"}]
 
 
-def test_osv_feed_with_fake_transport_matches_inventory():
-    calls = []
+def _batch_transports(record=SAMPLE, modified="2026-10-01T00:00:00Z"):
+    """Fake POST (batch discovery) + GET (detail) transports for one vuln."""
+    posts, gets = [], []
 
-    def fake(url, payload):
-        calls.append(payload)
-        return {"vulns": [SAMPLE]}
+    def post(url, payload):
+        posts.append((url, payload))
+        return {"results": [{"vulns": [{"id": record["id"], "modified": modified}]}]}
 
-    feed = OSVFeed([("PyPI", "requests")], transport=fake)
+    def get(url):
+        gets.append(url)
+        return record
+
+    return post, get, posts, gets
+
+
+def test_osv_feed_batch_matches_inventory():
+    post, get, posts, gets = _batch_transports()
+    feed = OSVFeed([("PyPI", "requests")], transport=post, get_transport=get)
     advisories = feed.fetch()
+
     assert len(advisories) == 1
-    assert calls == [{"package": {"ecosystem": "PyPI", "name": "requests"}}]
+    # One batch POST to querybatch, then one detail GET for the vuln.
+    assert posts[0][0].endswith("/v1/querybatch")
+    assert posts[0][1] == {"queries": [{"package": {"ecosystem": "PyPI", "name": "requests"}}]}
+    assert gets == ["https://api.osv.dev/v1/vulns/GHSA-xxxx-yyyy-zzzz"]
 
     asset = Asset("svc", "requests", "package", ecosystem="pypi", version="2.31.0")
     matches = Matcher().match(advisories, [asset])
@@ -81,12 +96,36 @@ def test_osv_feed_with_fake_transport_matches_inventory():
     assert matches[0].advisory.id == "CVE-2026-0001"
 
 
-def test_osv_feed_dedupes_across_packages():
+def test_osv_feed_single_mode():
     feed = OSVFeed(
-        [("PyPI", "requests"), ("PyPI", "requests")],
+        [("PyPI", "requests")],
         transport=lambda url, payload: {"vulns": [SAMPLE]},
+        batch=False,
     )
-    assert len(feed.fetch()) == 1
+    advisories = feed.fetch()
+    assert len(advisories) == 1
+    assert advisories[0].id == "CVE-2026-0001"
+
+
+def test_osv_feed_follows_pagination():
+    def post(url, payload):
+        if url.endswith("/v1/querybatch"):
+            return {"results": [{"vulns": [{"id": "OSV-1", "modified": "m1"}],
+                                 "next_page_token": "tok"}]}
+        # Continuation page via /v1/query with the page token.
+        assert payload.get("page_token") == "tok"
+        return {"vulns": [{"id": "OSV-2", "modified": "m2"}]}
+
+    got = []
+
+    def get(url):
+        got.append(url)
+        return {"id": url.rsplit("/", 1)[-1], "affected": []}
+
+    feed = OSVFeed([("PyPI", "pkg")], transport=post, get_transport=get)
+    advisories = feed.fetch()
+    assert {a.id for a in advisories} == {"OSV-1", "OSV-2"}
+    assert len(got) == 2
 
 
 def test_range_with_introduced_and_last_affected():
@@ -120,3 +159,54 @@ def test_packages_from_inventory_skips_unmappable():
     assert ("PyPI", "requests") in pairs
     assert ("npm", "lodash") in pairs
     assert all(eco != "os" for eco, _ in pairs)  # os skipped
+
+
+def test_cache_avoids_refetch_when_unchanged(tmp_path):
+    cache = OSVCache(tmp_path / "osv-cache.json")
+    detail_calls = []
+
+    def post(url, payload):
+        return {"results": [{"vulns": [{"id": SAMPLE["id"], "modified": "2026-10-01T00:00:00Z"}]}]}
+
+    def get(url):
+        detail_calls.append(url)
+        return SAMPLE
+
+    # First run: cache miss -> one detail fetch, then persisted to disk.
+    OSVFeed([("PyPI", "requests")], transport=post, get_transport=get, cache=cache).fetch()
+    assert len(detail_calls) == 1
+    assert (tmp_path / "osv-cache.json").exists()
+
+    # Second run with a fresh cache object reading the same file: no detail GET.
+    cache2 = OSVCache(tmp_path / "osv-cache.json")
+    OSVFeed([("PyPI", "requests")], transport=post, get_transport=get, cache=cache2).fetch()
+    assert len(detail_calls) == 1  # unchanged
+
+
+def test_cache_refetches_when_modified_changes(tmp_path):
+    cache = OSVCache(tmp_path / "osv-cache.json")
+    detail_calls = []
+
+    def make_post(modified):
+        return lambda url, payload: {
+            "results": [{"vulns": [{"id": SAMPLE["id"], "modified": modified}]}]
+        }
+
+    def get(url):
+        detail_calls.append(url)
+        return dict(SAMPLE, modified="new")
+
+    OSVFeed([("PyPI", "requests")], transport=make_post("v1"), get_transport=get, cache=cache).fetch()
+    assert len(detail_calls) == 1
+
+    # The advisory was updated upstream (new modified) -> cache invalidated.
+    cache2 = OSVCache(tmp_path / "osv-cache.json")
+    OSVFeed([("PyPI", "requests")], transport=make_post("v2"), get_transport=get, cache=cache2).fetch()
+    assert len(detail_calls) == 2
+
+
+def test_cache_tolerates_corrupt_file(tmp_path):
+    p = tmp_path / "bad.json"
+    p.write_text("{not json")
+    cache = OSVCache(p)  # must not raise
+    assert cache.get("anything", None) is None

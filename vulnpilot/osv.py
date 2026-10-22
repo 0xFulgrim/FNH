@@ -1,13 +1,15 @@
 """OSV feed — real advisories from https://osv.dev.
 
 OSV is a free, no-auth vulnerability database that aggregates GHSA, PyPA,
-RustSec, Debian, and more. This feed queries it per package and returns the
-advisories affecting those packages, parsed into our `Advisory` model. Our
-own `Matcher` then does the version-range matching against the inventory.
+RustSec, Debian, and more. This feed discovers which advisories affect each
+package in your inventory via the batch endpoint, fetches the full records
+(caching them on disk), and parses them into our `Advisory` model. Our own
+`Matcher` then does the version-range matching against the inventory.
 
 Network access goes through the stdlib (`urllib`) so the package keeps zero
-third-party dependencies. The HTTP transport is injectable, so tests and
-dry-runs never touch the network.
+third-party dependencies. Both HTTP transports (POST and GET) are injectable,
+so tests and dry-runs never touch the network, and an optional `OSVCache`
+avoids re-fetching records whose `modified` timestamp hasn't changed.
 
 Known simplification: our `Advisory` flattens vulnerable ranges into one list
 rather than keying them per affected package. Because we query OSV one package
@@ -23,6 +25,7 @@ import os
 import ssl
 import urllib.request
 from datetime import datetime
+from pathlib import Path
 from typing import Callable, Iterable, Optional
 
 from .cvss import base_score
@@ -46,7 +49,10 @@ ECOSYSTEM_MAP = {
     "hex": "Hex",
 }
 
-Transport = Callable[[str, dict], dict]
+PostTransport = Callable[[str, dict], dict]
+GetTransport = Callable[[str], dict]
+# Backwards-compatible alias (the POST transport was once the only one).
+Transport = PostTransport
 
 _SEVERITY_WORDS = {
     "LOW": Severity.LOW,
@@ -107,17 +113,26 @@ def _ssl_context() -> ssl.SSLContext:
     return ctx
 
 
+def _opener() -> urllib.request.OpenerDirector:
+    # ProxyHandler() with no args reads HTTP(S)_PROXY from the environment.
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler(),
+        urllib.request.HTTPSHandler(context=_ssl_context()),
+    )
+
+
 def _http_post(url: str, payload: dict, timeout: int = 20) -> dict:
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         url, data=data, headers={"Content-Type": "application/json"}, method="POST"
     )
-    # ProxyHandler() with no args reads HTTP(S)_PROXY from the environment.
-    opener = urllib.request.build_opener(
-        urllib.request.ProxyHandler(),
-        urllib.request.HTTPSHandler(context=_ssl_context()),
-    )
-    with opener.open(req, timeout=timeout) as resp:
+    with _opener().open(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _http_get(url: str, timeout: int = 20) -> dict:
+    req = urllib.request.Request(url, method="GET")
+    with _opener().open(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
@@ -226,20 +241,131 @@ def parse_osv_record(record: dict, queried_name: Optional[str] = None) -> Adviso
     )
 
 
+class OSVCache:
+    """On-disk cache of full OSV records, keyed by vuln id.
+
+    OSV records carry a `modified` timestamp. We store it alongside the record
+    and treat a cached entry as valid only while the timestamp still matches
+    what the batch query reports, so an updated advisory is re-fetched and
+    anything unchanged is served from disk.
+    """
+
+    def __init__(self, path: str | Path):
+        self.path = Path(path)
+        self._data: dict[str, dict] = {}
+        self._dirty = False
+        if self.path.exists():
+            try:
+                self._data = json.loads(self.path.read_text())
+            except (json.JSONDecodeError, OSError):
+                self._data = {}
+
+    def get(self, vuln_id: str, modified: Optional[str]) -> Optional[dict]:
+        entry = self._data.get(vuln_id)
+        if entry and (modified is None or entry.get("modified") == modified):
+            return entry.get("record")
+        return None
+
+    def put(self, vuln_id: str, modified: Optional[str], record: dict) -> None:
+        self._data[vuln_id] = {"modified": modified, "record": record}
+        self._dirty = True
+
+    def save(self) -> None:
+        if not self._dirty:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps(self._data))
+        self._dirty = False
+
+
+# Guard against a runaway pagination loop for a package with many advisories.
+_MAX_PAGES = 50
+
+
 class OSVFeed(Feed):
-    """Query OSV for advisories affecting a fixed set of packages."""
+    """Query OSV for advisories affecting a fixed set of packages.
+
+    Uses the batch endpoint (`/v1/querybatch`) to discover which advisories
+    touch each package in a single round trip. That endpoint returns only
+    `id` + `modified` per vuln, so full records are then fetched per id from
+    `/v1/vulns/{id}` — served from the cache when the `modified` timestamp is
+    unchanged. Set `batch=False` to fall back to per-package `/v1/query`
+    (full records, one request each).
+    """
 
     def __init__(
         self,
         packages: Iterable[tuple[str, str]],
         base_url: str = OSV_API,
-        transport: Optional[Transport] = None,
+        transport: Optional[PostTransport] = None,
+        get_transport: Optional[GetTransport] = None,
+        cache: Optional[OSVCache] = None,
+        batch: bool = True,
     ):
         self.packages = list(packages)
         self.base_url = base_url.rstrip("/")
-        self._post: Transport = transport or (lambda url, payload: _http_post(url, payload))
+        self.cache = cache
+        self.batch = batch
+        self._post: PostTransport = transport or (lambda url, payload: _http_post(url, payload))
+        self._get: GetTransport = get_transport or (lambda url: _http_get(url))
 
     def fetch(self) -> list[Advisory]:
+        advisories = self._fetch_batch() if self.batch else self._fetch_single()
+        if self.cache is not None:
+            self.cache.save()
+        return advisories
+
+    # -- batch discovery + per-id detail (with caching) -------------------
+
+    def _fetch_batch(self) -> list[Advisory]:
+        if not self.packages:
+            return []
+        queries = [{"package": {"ecosystem": eco, "name": name}} for eco, name in self.packages]
+        resp = self._post(f"{self.base_url}/v1/querybatch", {"queries": queries})
+        results = resp.get("results", []) or []
+
+        # Map each discovered vuln id -> (modified, the name we queried it under).
+        discovered: dict[str, tuple[Optional[str], str]] = {}
+        for (eco, name), result in zip(self.packages, results):
+            for vuln in self._paged_vulns(eco, name, result):
+                discovered.setdefault(vuln["id"], (vuln.get("modified"), name))
+
+        advisories: dict[str, Advisory] = {}
+        for vuln_id, (modified, name) in discovered.items():
+            record = self._record(vuln_id, modified)
+            advisory = parse_osv_record(record, queried_name=name)
+            advisories.setdefault(advisory.id, advisory)
+        return list(advisories.values())
+
+    def _paged_vulns(self, eco: str, name: str, result: dict) -> list[dict]:
+        """All (id, modified) vulns for one query, following pagination."""
+        vulns = list(result.get("vulns", []) or [])
+        token = result.get("next_page_token")
+        pages = 0
+        while token and pages < _MAX_PAGES:
+            pages += 1
+            page = self._post(
+                f"{self.base_url}/v1/query",
+                {"package": {"ecosystem": eco, "name": name}, "page_token": token},
+            )
+            vulns.extend(page.get("vulns", []) or [])
+            token = page.get("next_page_token")
+        return vulns
+
+    def _record(self, vuln_id: str, modified: Optional[str]) -> dict:
+        """Full OSV record for an id, from cache when the timestamp matches."""
+        if self.cache is not None:
+            cached = self.cache.get(vuln_id, modified)
+            if cached is not None:
+                return cached
+        record = self._get(f"{self.base_url}/v1/vulns/{vuln_id}")
+        if self.cache is not None:
+            self.cache.put(vuln_id, record.get("modified", modified), record)
+        return record
+
+    # -- fallback: one full-record query per package ----------------------
+
+    def _fetch_single(self) -> list[Advisory]:
         advisories: dict[str, Advisory] = {}
         for ecosystem, name in self.packages:
             resp = self._post(
@@ -247,7 +373,9 @@ class OSVFeed(Feed):
                 {"package": {"ecosystem": ecosystem, "name": name}},
             )
             for record in resp.get("vulns", []) or []:
+                # Full-record responses already carry `modified`; cache them too.
+                if self.cache is not None and record.get("id"):
+                    self.cache.put(record["id"], record.get("modified"), record)
                 advisory = parse_osv_record(record, queried_name=name)
-                # Dedupe across packages by advisory id; keep the first seen.
                 advisories.setdefault(advisory.id, advisory)
         return list(advisories.values())
