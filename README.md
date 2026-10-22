@@ -35,12 +35,36 @@ closed, otherwise recommend next steps.*
 ## Try it
 
 ```bash
+# Offline: example advisories, no network, no command execution.
 python -m vulnpilot run --dry-run
+
+# Live advisories from osv.dev for the packages in your inventory.
+python -m vulnpilot run --source osv --dry-run
 ```
 
-Runs against `examples/` with no network and no command execution. You'll see
-three outcomes: a patch applied+validated, a mitigation applied+validated, and
-one with no remediation that produces next-step recommendations.
+The offline run shows three outcomes: a patch applied+validated, a mitigation
+applied+validated, and one with no remediation that produces next-step
+recommendations.
+
+### Live source: OSV (`--source osv`)
+
+`vulnpilot/osv.py` queries [osv.dev](https://osv.dev) — a free, no-auth
+database aggregating GHSA, PyPA, RustSec, Debian, and more. It:
+
+- queries OSV once per package in your inventory (ecosystems are mapped,
+  e.g. `pypi` → `PyPI`; unmappable ones like a generic `os` are skipped);
+- converts OSV `introduced`/`fixed`/`last_affected` ranges into the matcher's
+  constraint strings, and computes a CVSS base score from the vector
+  (`vulnpilot/cvss.py`);
+- leaves version-range matching to our own `Matcher`, so the same logic drives
+  both the file and OSV sources.
+
+Zero third-party dependencies (stdlib `urllib`). The HTTP transport is
+injectable, so tests and dry-runs never hit the network.
+
+> **Network note:** a live OSV fetch needs outbound access to `api.osv.dev`.
+> In a restricted cloud environment that host must be allowlisted in the
+> environment's network policy, or the request is denied at the proxy.
 
 ## Modules
 

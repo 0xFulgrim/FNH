@@ -21,6 +21,7 @@ from .executor import (
 )
 from .feed import FileFeed
 from .inventory import FileInventory
+from .osv import OSVFeed, packages_from_inventory
 from .pipeline import Pipeline
 from .planner import MitigationLibrary, Planner
 from .recommend import summarize
@@ -30,8 +31,14 @@ EXAMPLES = Path(__file__).parent.parent / "examples"
 
 
 def build_pipeline(args: argparse.Namespace) -> Pipeline:
-    feed = FileFeed(args.advisories)
     inventory = FileInventory(args.inventory)
+    if args.source == "osv":
+        # Watch exactly the packages we actually run. OSV returns their known
+        # advisories; our matcher then applies version ranges to the inventory.
+        packages = packages_from_inventory(inventory.assets())
+        feed = OSVFeed(packages)
+    else:
+        feed = FileFeed(args.advisories)
     planner = Planner(MitigationLibrary(args.mitigations))
     runner = DryRunner() if args.dry_run else ShellRunner()
     validator = ChainValidator([VersionValidator(), MitigationValidator()])
@@ -51,6 +58,12 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
 
     run = sub.add_parser("run", help="run the remediation pipeline")
+    run.add_argument(
+        "--source",
+        choices=["file", "osv"],
+        default="file",
+        help="advisory source: 'file' (offline example) or 'osv' (live osv.dev)",
+    )
     run.add_argument("--advisories", default=str(EXAMPLES / "advisories.json"))
     run.add_argument("--inventory", default=str(EXAMPLES / "inventory.json"))
     run.add_argument("--mitigations", default=str(EXAMPLES / "mitigations.json"))
