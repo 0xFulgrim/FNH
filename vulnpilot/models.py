@@ -1,0 +1,118 @@
+"""Core data models shared across the pipeline stages.
+
+These are deliberately plain dataclasses so each stage has a stable, typed
+contract to pass along. Nothing here talks to the network or the OS.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from typing import Optional
+
+
+class Severity(str, Enum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"
+
+    @classmethod
+    def from_cvss(cls, score: float) -> "Severity":
+        if score >= 9.0:
+            return cls.CRITICAL
+        if score >= 7.0:
+            return cls.HIGH
+        if score >= 4.0:
+            return cls.MEDIUM
+        return cls.LOW
+
+
+@dataclass
+class Advisory:
+    """A single vulnerability advisory pulled from a feed (NVD, OSV, GHSA...)."""
+
+    id: str  # e.g. "CVE-2026-12345"
+    title: str
+    summary: str
+    severity: Severity
+    cvss: Optional[float] = None
+    published: Optional[datetime] = None
+    source: str = "unknown"
+    # Affected package coordinates, e.g. {"ecosystem": "pypi", "name": "requests"}.
+    affected: list[dict] = field(default_factory=list)
+    # Version ranges the advisory marks vulnerable, per affected package.
+    vulnerable_ranges: list[str] = field(default_factory=list)
+    # Versions that resolve the issue, if the advisory names any.
+    fixed_versions: list[str] = field(default_factory=list)
+    references: list[str] = field(default_factory=list)
+
+
+@dataclass
+class Asset:
+    """A thing in your infrastructure that could be affected.
+
+    Kept generic on purpose: a host, container image, package, or service.
+    """
+
+    id: str
+    name: str
+    kind: str  # "host" | "image" | "package" | "service"
+    ecosystem: Optional[str] = None  # "pypi", "npm", "os", ...
+    version: Optional[str] = None
+    environment: str = "production"  # "staging" | "production" | ...
+    tags: dict = field(default_factory=dict)
+
+
+@dataclass
+class Match:
+    """An advisory determined to affect a specific asset."""
+
+    advisory: Advisory
+    asset: Asset
+    reason: str  # human-readable explanation of why it matched
+
+    @property
+    def key(self) -> str:
+        return f"{self.advisory.id}@{self.asset.id}"
+
+
+class RemediationKind(str, Enum):
+    PATCH = "patch"
+    MITIGATION = "mitigation"
+    NONE = "none"
+
+
+@dataclass
+class Remediation:
+    """A proposed way to address a match."""
+
+    kind: RemediationKind
+    description: str
+    # For patches: target version to move the asset to.
+    target_version: Optional[str] = None
+    # Shell/config steps, declarative where possible. Treated as a plan, not
+    # auto-executed until it passes the safety gate and staging validation.
+    steps: list[str] = field(default_factory=list)
+    rollback: list[str] = field(default_factory=list)
+    confidence: float = 0.0  # 0..1
+
+
+class OutcomeStatus(str, Enum):
+    PATCHED = "patched"            # fix deployed + validated
+    MITIGATED = "mitigated"        # mitigation applied + validated on staging
+    NEEDS_REVIEW = "needs_review"  # no safe automated path; human action required
+    FAILED = "failed"             # attempted remediation did not hold
+    SKIPPED = "skipped"
+
+
+@dataclass
+class Outcome:
+    match: Match
+    status: OutcomeStatus
+    remediation: Optional[Remediation] = None
+    # Did validation on staging confirm the gap is closed?
+    validated: bool = False
+    notes: list[str] = field(default_factory=list)
+    recommendations: list[str] = field(default_factory=list)

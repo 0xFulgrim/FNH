@@ -1,0 +1,26 @@
+[
+  {
+    "id": "svc-api-requests",
+    "name": "requests",
+    "kind": "package",
+    "ecosystem": "pypi",
+    "version": "2.31.0",
+    "environment": "staging"
+  },
+  {
+    "id": "edge-nginx",
+    "name": "nginx",
+    "kind": "package",
+    "ecosystem": "os",
+    "version": "1.26.0",
+    "environment": "staging"
+  },
+  {
+    "id": "web-lodash",
+    "name": "lodash",
+    "kind": "package",
+    "ecosystem": "npm",
+    "version": "4.17.20",
+    "environment": "production"
+  }
+]

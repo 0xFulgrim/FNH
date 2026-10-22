@@ -1,0 +1,38 @@
+[
+  {
+    "id": "CVE-2026-0001",
+    "title": "requests: header injection in redirect handling",
+    "summary": "Crafted redirects could leak Authorization headers to a different host.",
+    "cvss": 8.1,
+    "published": "2026-10-01T00:00:00Z",
+    "source": "example-osv",
+    "affected": [{"ecosystem": "pypi", "name": "requests"}],
+    "vulnerable_ranges": ["<2.32.0"],
+    "fixed_versions": ["2.32.0"],
+    "references": ["https://example.test/advisories/CVE-2026-0001"]
+  },
+  {
+    "id": "CVE-2026-0002",
+    "title": "nginx: request smuggling via malformed chunked body",
+    "summary": "No upstream fix yet; mitigation available via config.",
+    "cvss": 7.5,
+    "published": "2026-10-10T00:00:00Z",
+    "source": "example-osv",
+    "affected": [{"ecosystem": "os", "name": "nginx"}],
+    "vulnerable_ranges": [">=1.24.0,<1.27.3"],
+    "fixed_versions": [],
+    "references": ["https://example.test/advisories/CVE-2026-0002"]
+  },
+  {
+    "id": "CVE-2026-0003",
+    "title": "lodash: prototype pollution (no fix, no mitigation)",
+    "summary": "Disputed; no remediation currently published.",
+    "cvss": 5.3,
+    "published": "2026-10-12T00:00:00Z",
+    "source": "example-osv",
+    "affected": [{"ecosystem": "npm", "name": "lodash"}],
+    "vulnerable_ranges": ["<4.17.22"],
+    "fixed_versions": [],
+    "references": ["https://example.test/advisories/CVE-2026-0003"]
+  }
+]

@@ -1,0 +1,14 @@
+{
+  "CVE-2026-0002": {
+    "description": "nginx request smuggling: reject malformed chunked bodies at the edge",
+    "steps": [
+      "nginx -t",
+      "echo 'applied chunked-body hardening (example staging step)'"
+    ],
+    "rollback": [
+      "echo 'reverted chunked-body hardening'"
+    ],
+    "confidence": 0.8,
+    "verify": "probe staging edge with a malformed chunked request and expect 400"
+  }
+}
