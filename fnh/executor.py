@@ -176,27 +176,38 @@ class VersionValidator(Validator):
 
 
 class MitigationValidator(Validator):
-    """For mitigations: run the advisory's `verify` probe against staging.
+    """For mitigations: run a `verify` probe against staging.
 
-    A real probe sends a safe, targeted request to your own staging service
-    and asserts the expected (now-hardened) response. We model that as a
-    single command whose exit code is the verdict (0 == closed). Under a
-    DryRunner there is nothing to probe, so an applied mitigation is assumed
-    to hold for reporting purposes.
+    A probe sends a safe, targeted request to your own staging service and
+    asserts the now-hardened response — a single command whose exit code is the
+    verdict (0 == closed). The command comes from the remediation itself (built
+    from the mitigation library's probe spec, see probes.py); a fallback probe
+    may be supplied to the constructor. Under a DryRunner there is nothing to
+    probe, so an applied mitigation is assumed to hold for reporting purposes.
+
+    `assume_closed_without_probe` controls the live-runner behavior when no
+    probe is configured: False (default, strict) refuses to claim closure it
+    cannot prove; True trusts the applied steps.
     """
 
-    def __init__(self, verify_command: str | None = None):
+    def __init__(
+        self,
+        verify_command: str | None = None,
+        assume_closed_without_probe: bool = False,
+    ):
         self.verify_command = verify_command
+        self.assume_closed_without_probe = assume_closed_without_probe
 
     def is_closed(self, match: Match, remediation: Remediation, runner: CommandRunner) -> bool:
         if remediation.kind != RemediationKind.MITIGATION:
             return False
         if isinstance(runner, DryRunner):
             return True
-        if not self.verify_command:
-            # No probe configured — cannot assert closure on a live target.
-            return False
-        return runner.run(self.verify_command).ok
+        probe = remediation.verify or self.verify_command
+        if not probe:
+            # No probe configured — only claim closure if explicitly trusted.
+            return self.assume_closed_without_probe
+        return runner.run(probe).ok
 
 
 class ChainValidator(Validator):

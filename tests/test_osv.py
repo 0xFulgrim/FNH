@@ -1,7 +1,7 @@
-from vulnpilot.cvss import base_score
-from vulnpilot.matcher import Matcher
-from vulnpilot.models import Asset
-from vulnpilot.osv import (
+from fnh.cvss import base_score
+from fnh.matcher import Matcher
+from fnh.models import Asset
+from fnh.osv import (
     OSVCache,
     OSVFeed,
     packages_from_inventory,

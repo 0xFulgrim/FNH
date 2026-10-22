@@ -2,7 +2,7 @@ import subprocess
 
 import pytest
 
-from vulnpilot.executor import CommandResult, SSHRunner
+from fnh.executor import CommandResult, SSHRunner
 
 
 def test_argv_defaults():

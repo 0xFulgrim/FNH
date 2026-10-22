@@ -13,6 +13,7 @@ from typing import Optional
 
 from .matcher import _cmp
 from .models import Match, Remediation, RemediationKind
+from .probes import build_verify
 
 
 def _best_fixed_version(match: Match) -> Optional[str]:
@@ -46,6 +47,7 @@ class MitigationLibrary:
             steps=entry.get("steps", []),
             rollback=entry.get("rollback", []),
             confidence=float(entry.get("confidence", 0.5)),
+            verify=build_verify(entry.get("verify")),
         )
 
 

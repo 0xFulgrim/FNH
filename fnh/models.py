@@ -97,11 +97,16 @@ class Remediation:
     steps: list[str] = field(default_factory=list)
     rollback: list[str] = field(default_factory=list)
     confidence: float = 0.0  # 0..1
+    # A command whose exit code is the verdict for a mitigation: 0 == the
+    # vulnerability is confirmed closed. Built from a probe spec (see probes.py)
+    # or supplied verbatim in the mitigation library.
+    verify: Optional[str] = None
 
 
 class OutcomeStatus(str, Enum):
     PATCHED = "patched"            # fix deployed + validated
     MITIGATED = "mitigated"        # mitigation applied + validated on staging
+    AWAITING_PROMOTION = "awaiting_promotion"  # validated on staging; prod change queued for approval
     NEEDS_REVIEW = "needs_review"  # no safe automated path; human action required
     FAILED = "failed"             # attempted remediation did not hold
     SKIPPED = "skipped"
