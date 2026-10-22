@@ -17,6 +17,7 @@ from .executor import (
     Executor,
     MitigationValidator,
     ShellRunner,
+    SSHRunner,
     VersionValidator,
 )
 from .feed import FileFeed
@@ -30,6 +31,22 @@ from .safety import SafetyPolicy
 EXAMPLES = Path(__file__).parent.parent / "examples"
 
 
+def _build_runner(args: argparse.Namespace):
+    if args.dry_run:
+        return DryRunner()
+    if args.staging_host:
+        return SSHRunner(
+            host=args.staging_host,
+            user=args.staging_user,
+            port=args.staging_port,
+            identity_file=args.ssh_identity,
+            known_hosts=args.ssh_known_hosts,
+            strict_host_key_checking="accept-new" if args.ssh_trust_new else "yes",
+        )
+    # No staging host: run locally (e.g. a local staging container).
+    return ShellRunner()
+
+
 def build_pipeline(args: argparse.Namespace) -> Pipeline:
     inventory = FileInventory(args.inventory)
     if args.source == "osv":
@@ -41,7 +58,7 @@ def build_pipeline(args: argparse.Namespace) -> Pipeline:
     else:
         feed = FileFeed(args.advisories)
     planner = Planner(MitigationLibrary(args.mitigations))
-    runner = DryRunner() if args.dry_run else ShellRunner()
+    runner = _build_runner(args)
     validator = ChainValidator([VersionValidator(), MitigationValidator()])
     executor = Executor(runner=runner, validator=validator)
     policy = SafetyPolicy()
@@ -79,6 +96,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     run.add_argument("--mitigations", default=str(EXAMPLES / "mitigations.json"))
     run.add_argument("--dry-run", action="store_true", help="never execute commands")
+    staging = run.add_argument_group("remote staging (ssh)")
+    staging.add_argument("--staging-host", default=None, help="run steps on this host over ssh")
+    staging.add_argument("--staging-user", default=None)
+    staging.add_argument("--staging-port", type=int, default=22)
+    staging.add_argument("--ssh-identity", default=None, help="private key file (-i)")
+    staging.add_argument("--ssh-known-hosts", default=None, help="pinned known_hosts file")
+    staging.add_argument(
+        "--ssh-trust-new",
+        action="store_true",
+        help="trust-on-first-use host keys (StrictHostKeyChecking=accept-new)",
+    )
     run.add_argument(
         "--allow-production",
         action="store_true",

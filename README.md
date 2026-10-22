@@ -94,9 +94,28 @@ Swap the file-backed reference pieces for real ones on the same interfaces:
 
 - `Feed` → an HTTPS client for OSV / NVD / GHSA.
 - `Inventory` → your CMDB, cloud asset API, or collected SBOMs.
-- `CommandRunner` → the `ShellRunner` (or a remote runner hitting staging over
-  SSH / an orchestration API). Keep `DryRunner` for change previews.
+- `CommandRunner` → `SSHRunner` to execute steps on a remote staging host, or
+  `ShellRunner` for a local staging container. Keep `DryRunner` for previews.
 - `Validator` → version checks per ecosystem plus mitigation probes that send
   safe, targeted requests to *your own* staging services.
+
+### Remote staging runner (SSH)
+
+`SSHRunner` (`vulnpilot/executor.py`) runs remediation steps on a remote
+staging host via the system `ssh` client — no third-party deps. The command
+is passed as a single argument, so there's no local shell to inject into, and
+host-key checking is strict by default (pin a `known_hosts` file for the
+strongest guarantee; `--ssh-trust-new` is trust-on-first-use).
+
+```bash
+python -m vulnpilot run --source osv \
+  --staging-host staging.internal --staging-user deploy \
+  --ssh-identity ~/.ssh/vulnpilot --ssh-known-hosts ./known_hosts
+```
+
+It's a staging runner by design: paired with `SafetyPolicy` (autonomous
+changes restricted to staging, forbidden-command denylist, confidence and
+severity floors), the tool never reaches production on its own — promotion
+stays a separate, human-gated step.
 
 Everything above production stays behind `SafetyPolicy`. Keep it that way.

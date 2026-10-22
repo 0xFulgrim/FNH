@@ -15,9 +15,10 @@ shell out.
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .matcher import _cmp
 from .models import Match, Remediation, RemediationKind
@@ -65,6 +66,75 @@ class ShellRunner(CommandRunner):
         return CommandResult(
             command=command,
             returncode=proc.returncode,
+            stdout=proc.stdout,
+            stderr=proc.stderr,
+        )
+
+
+@dataclass
+class SSHRunner(CommandRunner):
+    """Executes commands on a remote *staging* host over the ssh CLI.
+
+    Uses the system `ssh` client (no third-party deps). The remediation
+    command is passed as a single argument, so there is no local shell to
+    inject into; ssh hands it to the remote login shell exactly as written —
+    the same execution model as ShellRunner, but on the staging box.
+
+    Host-key checking is on by default. Point `known_hosts` at a pinned file
+    for the strongest guarantee; `strict_host_key_checking="accept-new"` will
+    trust-on-first-use, and only an explicit opt-out disables checking.
+
+    Intended for staging only. Combined with SafetyPolicy (which restricts
+    autonomous changes to staging environments and vets every step), this
+    runner never reaches production on its own.
+    """
+
+    host: str
+    user: str | None = None
+    port: int = 22
+    identity_file: str | None = None
+    known_hosts: str | None = None
+    # "yes" (require known host), "accept-new" (TOFU), or "no" (opt-out).
+    strict_host_key_checking: str = "yes"
+    connect_timeout: int = 15
+    timeout: int = 300
+    extra_opts: list[str] = field(default_factory=list)
+
+    @property
+    def target(self) -> str:
+        return f"{self.user}@{self.host}" if self.user else self.host
+
+    def _argv(self, command: str) -> list[str]:
+        argv = [
+            "ssh",
+            "-o", "BatchMode=yes",  # never block on a password/passphrase prompt
+            "-o", f"ConnectTimeout={self.connect_timeout}",
+            "-o", f"StrictHostKeyChecking={self.strict_host_key_checking}",
+        ]
+        if self.known_hosts:
+            argv += ["-o", f"UserKnownHostsFile={shlex.quote(self.known_hosts)}"]
+        if self.identity_file:
+            argv += ["-i", self.identity_file, "-o", "IdentitiesOnly=yes"]
+        if self.port != 22:
+            argv += ["-p", str(self.port)]
+        argv += list(self.extra_opts)
+        # The remote command is one argv element; ssh runs it via the remote shell.
+        argv += [self.target, command]
+        return argv
+
+    def run(self, command: str) -> CommandResult:
+        try:
+            proc = subprocess.run(
+                self._argv(command),
+                capture_output=True,
+                text=True,
+                timeout=self.timeout,
+            )
+        except subprocess.TimeoutExpired:
+            return CommandResult(command, returncode=124, stderr="ssh timed out")
+        return CommandResult(
+            command=command,
+            returncode=proc.returncode,  # ssh returns 255 on connection failure
             stdout=proc.stdout,
             stderr=proc.stderr,
         )
