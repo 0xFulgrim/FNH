@@ -1,140 +1,229 @@
-# Friendly Neighborhood Helminth (`fnh`)
+# FNH (Friendly Neighborhood Helminth)
 
 [![CI](https://github.com/0xFulgrim/FNH/actions/workflows/ci.yml/badge.svg)](https://github.com/0xFulgrim/FNH/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-An autonomous vulnerability-management pipeline for **your own infrastructure**.
-Like a benign gut symbiont, it lives inside your estate and quietly keeps it
-healthy — watching advisories, checking what you run, and closing gaps on
-staging before anything reaches production.
+FNH matches vulnerability advisories against the software you run, applies
+patches or mitigations on a staging host, checks that the fix worked, and
+queues validated production changes for approval.
 
-```
-advisory feed  →  check infra (asset inventory)  →  match
-      │
-      ├─ patch available?  → apply on staging → validate → (prod) queue promotion for approval
-      │
-      └─ no patch?         → find mitigation   → apply on staging → probe that the gap is closed
-                                                        │
-                                                        └─ still open / nothing to do → recommend next steps
-```
+It is meant for infrastructure you own and operate.
 
-This is the flow you described: *news feed → agent checks infra → deploys
-patches; if no patch, check mitigations, test on staging, confirm the gap is
-closed, otherwise recommend next steps* — with a human-gated promotion step to
-carry a staging-validated fix into production.
+## Features
 
-## Design principles
+- Advisories from [OSV](https://osv.dev) (batch queries, on-disk cache) or a local JSON file
+- Inventory from a JSON file, or collected live from a host with `pip`, `dpkg` and `npm`
+- Version-range matching and CVSS v3 base scoring
+- Patch selection, with a fallback to a mitigation library
+- Remediation runs locally or on a remote staging host over SSH
+- Post-fix validation: version checks for patches, HTTP/TCP probes for mitigations
+- Automatic rollback when a step or validation fails
+- Production changes are written out as promotion requests and applied only with `--approve`
+- No runtime dependencies outside the Python standard library
 
-- **Staging first, always.** Every change is applied and validated on staging
-  before anything is proposed for production.
-- **Production is gated.** The tool never changes production on its own. A
-  production fix that validates on staging becomes a **promotion request** a
-  human must approve (`fnh promote`); without a promoter it's `needs_review`.
-- **Validate, don't assume.** A remediation only counts as done when a
-  validator confirms on staging that the vulnerability is actually closed
-  (version assertion for patches; a real probe for mitigations, see `probes.py`).
-- **Plans, not blind execution.** The planner emits steps and a rollback; the
-  safety policy vets them (confidence threshold, severity floor, forbidden
-  commands) before the executor runs anything.
-- **Pluggable stages.** Each stage is an interface with a reference
-  implementation, so the whole pipeline runs offline.
+## Installation
 
-## Try it
+Requires Python 3.10 or later.
 
 ```bash
-# Offline: example advisories, no network, no command execution.
-python -m fnh run --dry-run
-
-# Live advisories from osv.dev for the packages in your inventory, cached.
-python -m fnh run --source osv --cache .osv-cache.json --dry-run
-
-# Inventory a real host and queue any production fixes for approval.
-python -m fnh run --source osv \
-  --inventory-source live --collect pip,dpkg --environment production \
-  --staging-host staging.internal --staging-user deploy \
-  --promote-dir ./promotions
-
-# Review and apply queued production promotions (human-gated).
-python -m fnh promote --promote-dir ./promotions
-python -m fnh promote --promote-dir ./promotions --apply <id> --approve \
-  --prod-host prod.internal --prod-user deploy
+git clone https://github.com/0xFulgrim/FNH.git
+cd FNH
+pip install -e .
 ```
 
-## Stages
+This installs the `fnh` command. `python -m fnh` also works.
 
-| Stage | File | Role |
-|-------|------|------|
-| 1. Feed | `feed.py`, `osv.py` | Ingest advisories. `FileFeed` (offline) or `OSVFeed` (live). |
-| 2a. Inventory | `inventory.py` | `FileInventory`, or `LiveInventory` collecting from a host. |
-| 2b. Match | `matcher.py` | Map advisories to affected assets by version range. |
-| 3. Plan | `planner.py` | Choose a patch, else a mitigation (with a verify probe). |
-| 4. Apply+validate | `executor.py` | Run on staging, confirm the gap is closed, roll back on failure. |
-| 5. Recommend | `recommend.py` | Next steps + a Markdown report when automation can't finish. |
-| 6. Promote | `promote.py` | Queue a staging-validated prod fix for human approval; apply when approved. |
-| Guardrails | `safety.py` | What may run automatically vs. needs a human. |
-| CVSS / Probes | `cvss.py`, `probes.py` | Score vectors; build "is it closed?" checks. |
-| Orchestrator | `pipeline.py` | Wires the stages together. |
+The remote runner uses the system `ssh` client. Mitigation probes use `curl`
+and `bash` on the staging host.
 
-## Live advisory source: OSV (`--source osv`)
+## Quick start
 
-`osv.py` queries [osv.dev](https://osv.dev) — a free, no-auth database
-aggregating GHSA, PyPA, RustSec, Debian, and more. It discovers advisories for
-all inventory packages in **one batch request** (`/v1/querybatch`, following
-pagination), fetches each full record from `/v1/vulns/{id}` served from an
-optional **on-disk cache** (`--cache`) keyed on the record's `modified`
-timestamp, maps ecosystems (`pypi` → `PyPI`), converts OSV ranges into the
-matcher's constraints, and computes a CVSS base score from the vector
-(`cvss.py`). `--no-batch` falls back to one `/v1/query` per package.
+Run against the bundled examples. `--dry-run` prints the commands without
+executing anything:
 
-> **Network note:** a live OSV fetch needs outbound access to `api.osv.dev`;
-> in a restricted environment that host must be allowlisted in the network
-> policy, or the request is denied at the proxy.
+```bash
+fnh run --dry-run
+```
 
-## Live inventory (`--inventory-source live`)
+```
+## Summary
+- mitigated: 1
+- needs_review: 1
+- patched: 1
 
-`LiveInventory` collects installed packages from a host by running collectors
-through the same `CommandRunner` the executor uses (local or over SSH), so you
-inventory and remediate the same box:
+## CVE-2026-0001 — requests [patched]
+- severity: high
+- why: requests 2.31.0 satisfies vulnerable range '<2.32.0'
+- remediation: Upgrade requests to 2.32.0 (kind=patch, validated=True)
+...
+```
 
-- `pip` — `pip list --format=json` (ecosystem `pypi`)
-- `dpkg` — `dpkg-query` (pass `--dpkg-ecosystem Debian:12` to match OSV)
-- `npm` — `npm ls --json --depth=0` (ecosystem `npm`)
+## Usage
 
-## Remote staging runner (SSH)
+### Scan and remediate
 
-`SSHRunner` (`executor.py`) runs remediation steps on a remote staging host via
-the system `ssh` client — no third-party deps. The command is passed as a
-single argument, so there's no local shell to inject into, and host-key
-checking is strict by default (pin a `known_hosts` file; `--ssh-trust-new` is
-trust-on-first-use). Local `ShellRunner` is the default; `DryRunner` previews.
+```bash
+# OSV advisories for the packages in an inventory file
+fnh run --source osv --inventory inventory.json --cache .osv-cache.json
 
-## Mitigation probes (`probes.py`)
+# Collect packages from a staging host and remediate there
+fnh run --source osv \
+  --inventory-source live --collect pip,dpkg --dpkg-ecosystem Debian:12 \
+  --staging-host staging.internal --staging-user deploy \
+  --ssh-identity ~/.ssh/fnh --ssh-known-hosts ./known_hosts
 
-A mitigation is only trusted once a probe confirms it. A probe is a small, safe
-command run against *your own* staging service whose exit code is the verdict
-(0 = closed). The mitigation library declares one instead of hand-writing shell:
+# Queue production fixes that pass on staging
+fnh run --source osv --inventory inventory.json --promote-dir ./promotions
+```
+
+| Flag | Description |
+|------|-------------|
+| `--source {file,osv}` | Advisory source (default `file`) |
+| `--advisories PATH` | Advisory file for `--source file` |
+| `--cache PATH` | OSV record cache file |
+| `--no-batch` | One OSV `/v1/query` per package instead of `/v1/querybatch` |
+| `--inventory-source {file,live}` | Inventory source (default `file`) |
+| `--inventory PATH` | Inventory file for `--inventory-source file` |
+| `--collect LIST` | Live collectors: `pip`, `dpkg`, `npm` (default `pip`) |
+| `--environment NAME` | Environment label for collected assets (default `staging`) |
+| `--dpkg-ecosystem NAME` | OSV ecosystem for dpkg packages, e.g. `Debian:12` |
+| `--mitigations PATH` | Mitigation library |
+| `--staging-host HOST` | Run steps on this host over SSH (local if omitted) |
+| `--staging-user`, `--staging-port` | SSH user and port |
+| `--ssh-identity PATH` | SSH private key |
+| `--ssh-known-hosts PATH` | Pinned known_hosts file |
+| `--ssh-trust-new` | Accept unknown host keys on first connect |
+| `--promote-dir DIR` | Write promotion requests here |
+| `--allow-production` | Let the pipeline change production assets directly |
+| `--dry-run` | Print commands, execute nothing |
+
+### Promote to production
+
+```bash
+# List requests
+fnh promote --promote-dir ./promotions
+
+# Show the steps for one request
+fnh promote --promote-dir ./promotions --apply 3f1c9a2b7d10
+
+# Apply it
+fnh promote --promote-dir ./promotions --apply 3f1c9a2b7d10 --approve \
+  --approved-by alice --prod-host prod.internal --prod-user deploy
+```
+
+Without `--approve`, `promote --apply` prints the steps and exits 1. With it,
+the steps run on the production host, then the verify probe, and the rollback
+runs if either fails.
+
+## Input formats
+
+### Inventory
 
 ```json
-"CVE-2026-0002": {
-  "steps": ["..."],
-  "verify": {"probe": "http_status", "url": "https://stg/", "expect": 400}
+[
+  {"id": "api-requests", "name": "requests", "ecosystem": "pypi",
+   "version": "2.31.0", "environment": "staging"}
+]
+```
+
+Supported `ecosystem` values for OSV lookups: `pypi`, `npm`, `go`, `maven`,
+`nuget`, `cargo`, `rubygems`, `composer`, `pub`, `hex`, or any OSV ecosystem
+name such as `Debian:12`.
+
+### Advisories (`--source file`)
+
+```json
+[
+  {"id": "CVE-2026-0001", "cvss": 8.1,
+   "affected": [{"ecosystem": "pypi", "name": "requests"}],
+   "vulnerable_ranges": ["<2.32.0"], "fixed_versions": ["2.32.0"]}
+]
+```
+
+### Mitigation library
+
+Entries are keyed by advisory ID or package name. `verify` is a probe spec
+or a shell command. Exit status 0 means the issue is closed.
+
+```json
+{
+  "CVE-2026-0002": {
+    "description": "Reject malformed chunked bodies at the edge",
+    "steps": ["cp hardening.conf /etc/nginx/conf.d/", "nginx -t", "nginx -s reload"],
+    "rollback": ["rm /etc/nginx/conf.d/hardening.conf", "nginx -s reload"],
+    "confidence": 0.8,
+    "verify": {"probe": "http_status", "url": "https://staging.internal/",
+               "method": "POST", "header": "Transfer-Encoding: chunked",
+               "data": "malformed", "expect": 400}
+  }
 }
 ```
 
-Built-ins: `http_status`, `http_header_absent`, `port_closed`, `command_fails`.
-A raw string `verify` is also honored verbatim.
+| Probe | Passes when | Fields |
+|-------|-------------|--------|
+| `http_status` | Response code equals `expect` | `url`, `expect`, `method`, `header`, `data`, `insecure`, `timeout` |
+| `http_header_absent` | Response lacks `header` | `url`, `header`, `insecure`, `timeout` |
+| `port_closed` | TCP connect fails | `host`, `port`, `timeout` |
+| `command_fails` | `cmd` exits non-zero | `cmd` |
 
-## Promotion (`fnh promote`)
+## How it works
 
-Production changes never happen autonomously. When a production fix validates on
-staging, it's recorded as a `PromotionRequest` (think "open a change ticket").
-`fnh promote` lists pending requests; `--apply <id> --approve` executes an
-**approved** request against production (`apply_promotion` refuses anything not
-approved), running the verify probe and rolling back on failure.
+1. Load advisories and inventory.
+2. Match advisories to assets by ecosystem, name and version range.
+3. Plan a remediation: the lowest fixed version above the installed one,
+   otherwise a mitigation library entry, otherwise none.
+4. Check the plan against the safety policy.
+5. Apply on staging, validate, and roll back on failure.
+6. For production assets, write a promotion request if a promoter is configured.
+7. Print a Markdown report with next steps for anything left open.
 
-Everything above production stays behind `SafetyPolicy`. Keep it that way.
+Outcome states: `patched`, `mitigated`, `awaiting_promotion`, `needs_review`, `failed`.
 
-## Zero dependencies
+## Safety defaults
 
-Pure Python standard library at runtime (`pytest` only for the test suite).
-Every network and command boundary is injectable, so `python -m pytest` runs
-the whole thing offline.
+Defined in `fnh/safety.py`:
+
+- Steps run automatically only for `staging` assets.
+- Production needs approval through `fnh promote`, unless `--allow-production` is set.
+- Plans need confidence of at least 0.75 and severity of at least `high`.
+- Steps containing `rm -rf /`, `mkfs`, `dd if=`, `> /dev/sd` or a fork bomb are refused.
+- Without a probe, a mitigation on a live host is not counted as validated.
+- SSH runs with `BatchMode=yes` and `StrictHostKeyChecking=yes` by default.
+
+## Limitations
+
+- Version comparison handles dotted numeric versions only. Debian epochs and
+  pre-release tags are not compared correctly.
+- CVSS v4 vectors are not scored. FNH falls back to the severity label in the
+  OSV record.
+- Inventory entries with a generic `os` ecosystem are skipped for OSV lookups.
+  Use a specific ecosystem like `Debian:12`.
+- Only ranges for the queried package are kept from multi-package advisories.
+- Live OSV queries need outbound HTTPS to `api.osv.dev`.
+
+## Development
+
+```bash
+pip install -e ".[dev]"
+python -m pytest
+```
+
+Tests use injected transports and runners, so they run without network access or SSH.
+
+| Module | Purpose |
+|--------|---------|
+| `feed.py`, `osv.py` | Advisory sources |
+| `inventory.py` | File and live inventory |
+| `matcher.py` | Version-range matching |
+| `planner.py` | Patch or mitigation selection |
+| `executor.py` | Runners and validators |
+| `probes.py` | Verify command builders |
+| `promote.py` | Promotion requests |
+| `safety.py` | Safety policy |
+| `cvss.py` | CVSS v3 scoring |
+| `recommend.py` | Report output |
+| `pipeline.py` | Orchestration |
+
+## License
+
+MIT. See [LICENSE](LICENSE).

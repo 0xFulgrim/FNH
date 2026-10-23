@@ -7,6 +7,7 @@ name = "fnh"
 version = "0.1.0"
 description = "Friendly Neighborhood Helminth: autonomous vuln-management pipeline (feed -> infra -> patch/mitigate -> validate on staging -> promote)"
 requires-python = ">=3.10"
+license = { file = "LICENSE" }
 dependencies = []
 
 [project.optional-dependencies]
