@@ -41,7 +41,7 @@ def test_pip_collector_handles_failure():
 
 
 def test_dpkg_collector():
-    out = "nginx\t1.26.0\nopenssl\t3.0.11-1\n\t\n"
+    out = "ii \tnginx\t1.26.0\nii \topenssl\t3.0.11-1\nrc \told-pkg\t1.0\n\t\n"
     runner = FakeRunner([("dpkg-query", _ok(out))])
     assets = DpkgCollector(osv_ecosystem="Debian:12").collect(runner, "production")
     names = {a.name: a.version for a in assets}
@@ -61,7 +61,7 @@ def test_npm_collector_parses_despite_nonzero_exit():
 def test_live_inventory_merges_collectors():
     runner = FakeRunner([
         ("pip list", _ok(json.dumps([{"name": "requests", "version": "2.31.0"}]))),
-        ("dpkg-query", _ok("nginx\t1.26.0\n")),
+        ("dpkg-query", _ok("ii \tnginx\t1.26.0\n")),
     ])
     inv = LiveInventory(runner, [PipCollector(), DpkgCollector()], environment="staging")
     assets = inv.assets()

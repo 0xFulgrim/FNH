@@ -10,6 +10,7 @@ executor uses, so you inventory and remediate the same box.
 from __future__ import annotations
 
 import json
+import shlex
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Protocol
@@ -97,16 +98,20 @@ class DpkgCollector(Collector):
         self.osv_ecosystem = osv_ecosystem
 
     def collect(self, runner: _Runner, environment: str) -> list[Asset]:
-        result = runner.run(r"dpkg-query -W -f='${Package}\t${Version}\n'")
+        result = runner.run(
+            r"dpkg-query -W -f='${db:Status-Abbrev}\t${Package}\t${Version}\n'"
+        )
         if not result.ok:
             return []
         assets: list[Asset] = []
         for line in result.stdout.splitlines():
-            if "\t" not in line:
+            fields = line.split("\t")
+            if len(fields) != 3:
                 continue
-            name, version = line.split("\t", 1)
-            name, version = name.strip(), version.strip()
-            if not name:
+            status, name, version = (f.strip() for f in fields)
+            # Only "ii" is installed; "rc" etc. are removed packages whose
+            # config files remain and would show up as false positives.
+            if not name or not status.startswith("ii"):
                 continue
             assets.append(
                 Asset(
@@ -133,7 +138,7 @@ class NpmCollector(Collector):
         if self.global_:
             cmd.append("-g")
         if self.prefix:
-            cmd += ["--prefix", self.prefix]
+            cmd += ["--prefix", shlex.quote(self.prefix)]
         # npm exits non-zero on peer-dep warnings but still prints valid JSON,
         # so parse stdout regardless of the exit code.
         result = runner.run(" ".join(cmd))

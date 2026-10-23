@@ -45,9 +45,7 @@ def _ssh_runner(host, user, port, identity, known_hosts, trust_new):
     )
 
 
-def _build_runner(args: argparse.Namespace):
-    if args.dry_run:
-        return DryRunner()
+def _staging_runner(args: argparse.Namespace):
     if args.staging_host:
         return _ssh_runner(
             args.staging_host, args.staging_user, args.staging_port,
@@ -55,6 +53,19 @@ def _build_runner(args: argparse.Namespace):
         )
     # No staging host: run locally (e.g. a local staging container).
     return ShellRunner()
+
+
+def _production_runner(args: argparse.Namespace):
+    if not args.allow_production:
+        return None
+    if not args.prod_host:
+        raise SystemExit("--allow-production requires --prod-host")
+    if args.dry_run:
+        return DryRunner()
+    return _ssh_runner(
+        args.prod_host, args.prod_user, args.prod_port,
+        args.ssh_identity, args.ssh_known_hosts, args.ssh_trust_new,
+    )
 
 
 def _build_inventory(args: argparse.Namespace, runner):
@@ -71,8 +82,11 @@ def _build_inventory(args: argparse.Namespace, runner):
 
 
 def build_pipeline(args: argparse.Namespace) -> Pipeline:
-    runner = _build_runner(args)
-    inventory = _build_inventory(args, runner)
+    staging = _staging_runner(args)
+    # Collecting inventory only reads package lists, so it uses the real host
+    # even under --dry-run; only remediation is replaced by a DryRunner.
+    inventory = _build_inventory(args, staging)
+    runner = DryRunner() if args.dry_run else staging
     if args.source == "osv":
         # Watch exactly the packages we actually run. OSV returns their known
         # advisories; our matcher then applies version ranges to the inventory.
@@ -83,10 +97,13 @@ def build_pipeline(args: argparse.Namespace) -> Pipeline:
         feed = FileFeed(args.advisories)
     planner = Planner(MitigationLibrary(args.mitigations))
     validator = ChainValidator([VersionValidator(), MitigationValidator()])
-    executor = Executor(runner=runner, validator=validator)
+    executor = Executor(
+        runner=runner, validator=validator, production_runner=_production_runner(args)
+    )
     policy = SafetyPolicy()
     if args.allow_production:
-        # Opt-in only; still requires the change to validate on staging first.
+        # Production assets are changed directly on --prod-host, subject to the
+        # same plan checks (confidence, severity, forbidden commands).
         policy.autonomous_environments.add("production")
         policy.require_human_approval_for_production = False
     promoter = FilePromoter(args.promote_dir) if args.promote_dir else None
@@ -107,7 +124,7 @@ def _add_run_parser(sub) -> None:
                      help="use one /v1/query per package instead of the batch endpoint")
     run.add_argument("--dry-run", action="store_true", help="never execute commands")
     run.add_argument("--allow-production", action="store_true",
-                     help="opt in to acting on production (still staging-validated first)")
+                     help="change production assets directly on --prod-host")
     run.add_argument("--promote-dir", default=None,
                      help="queue validated production fixes here for approval")
 
@@ -131,6 +148,11 @@ def _add_run_parser(sub) -> None:
     staging.add_argument("--ssh-known-hosts", default=None, help="pinned known_hosts file")
     staging.add_argument("--ssh-trust-new", action="store_true",
                          help="trust-on-first-use host keys (StrictHostKeyChecking=accept-new)")
+
+    prod = run.add_argument_group("production (ssh, with --allow-production)")
+    prod.add_argument("--prod-host", default=None, help="production host for direct changes")
+    prod.add_argument("--prod-user", default=None)
+    prod.add_argument("--prod-port", type=int, default=22)
 
 
 def _add_promote_parser(sub) -> None:
@@ -164,7 +186,7 @@ def _cmd_promote(args: argparse.Namespace) -> int:
 
     try:
         request = promoter.load(args.apply)
-    except FileNotFoundError:
+    except (FileNotFoundError, ValueError):
         print(f"no such promotion request: {args.apply}", file=sys.stderr)
         return 2
 

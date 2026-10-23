@@ -30,6 +30,7 @@ from typing import Callable, Iterable, Optional
 
 from .cvss import base_score
 from .feed import Feed
+from .matcher import _in_range
 from .models import Advisory, Asset, Severity
 
 OSV_API = "https://api.osv.dev"
@@ -146,6 +147,10 @@ def _ranges_to_constraints(affected: dict) -> tuple[list[str], list[str]]:
     constraints: list[str] = []
     fixed: list[str] = []
     for rng in affected.get("ranges", []):
+        # GIT ranges are commit hashes, not versions; comparing them as
+        # versions produces false matches and nonsense upgrade targets.
+        if rng.get("type", "ECOSYSTEM") not in ("ECOSYSTEM", "SEMVER"):
+            continue
         lower: Optional[str] = None
         for event in rng.get("events", []):
             if "introduced" in event:
@@ -168,9 +173,11 @@ def _ranges_to_constraints(affected: dict) -> tuple[list[str], list[str]]:
         if lower is not None:
             # An introduced with no closing event: everything from there on.
             constraints.append(f">={lower}" if lower != "0" else "")
-    # Explicit affected versions (no ranges): each becomes its own ==constraint.
+    # Explicit affected versions: add any the ranges above don't already cover.
+    # If every range was skipped (e.g. GIT-only), the version list is all we have.
     for version in affected.get("versions", []):
-        if not any(f"<{version}" in c or f"=={version}" in c for c in constraints):
+        eco = (affected.get("package") or {}).get("ecosystem")
+        if not any(_in_range(version, c, eco) for c in constraints):
             constraints.append(f"=={version}")
     return constraints, fixed
 
@@ -215,7 +222,12 @@ def parse_osv_record(record: dict, queried_name: Optional[str] = None) -> Adviso
 
     published = None
     if record.get("published"):
-        published = datetime.fromisoformat(record["published"].replace("Z", "+00:00"))
+        try:
+            published = datetime.fromisoformat(record["published"].replace("Z", "+00:00"))
+        except ValueError:
+            # Older Pythons reject some valid RFC 3339 forms (e.g. nanoseconds);
+            # a missing date shouldn't drop the advisory.
+            published = None
 
     # Prefer a CVE alias as the id when present; it's what people recognize.
     vuln_id = record["id"]

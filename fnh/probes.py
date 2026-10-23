@@ -17,6 +17,7 @@ returns 400, a disabled endpoint returns 404, a port no longer listens.
 
 from __future__ import annotations
 
+import re
 import shlex
 from typing import Callable, Optional
 
@@ -63,8 +64,13 @@ def http_header_absent(spec: dict) -> str:
     if spec.get("insecure"):
         curl.append("-k")
     curl.append(_q(url))
-    # grep -qi finds the header; we invert so "absent" => exit 0.
-    return "! " + " ".join(curl) + " | grep -qi " + _q(header + ":")
+    # Capture headers first so a failed request (service down, TLS error) fails
+    # the probe instead of reading as "header absent". Then invert grep so
+    # absent => exit 0. Anchored to the start of a header line.
+    return (
+        "h=$(" + " ".join(curl) + ") && ! printf '%s\\n' \"$h\" | grep -qi "
+        + _q("^" + header + ":")
+    )
 
 
 def port_closed(spec: dict) -> str:
@@ -72,8 +78,13 @@ def port_closed(spec: dict) -> str:
 
     spec: host, port, timeout (seconds, default 5).
     """
-    host, port = spec["host"], int(spec["port"])
+    host, port = str(spec["host"]), int(spec["port"])
     timeout = int(spec.get("timeout", 5))
+    # The host lands inside a `bash -c` string, so only allow hostname/IP chars.
+    if not re.fullmatch(r"[A-Za-z0-9.:\-\[\]]+", host):
+        raise ValueError(f"invalid host for port_closed probe: {host!r}")
+    if not 0 < port < 65536:
+        raise ValueError(f"invalid port for port_closed probe: {port}")
     # bash's /dev/tcp connects; invert so a refused connection => exit 0.
     return (
         f"! timeout {timeout} bash -c "

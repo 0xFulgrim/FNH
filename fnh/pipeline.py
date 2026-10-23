@@ -61,17 +61,21 @@ class Pipeline:
             # A production change we can't auto-apply, but could validate on a
             # staging mirror and then queue for human approval.
             if self._promotable(match, remediation):
-                return self._validate_for_promotion(match, remediation)
-            return Outcome(
-                match=match,
-                status=OutcomeStatus.NEEDS_REVIEW,
-                remediation=remediation,
-                notes=[f"held: {reason}"],
-                recommendations=recommendations_for(match, remediation, False, reason),
+                plan_ok, plan_reason = self.policy.check_plan(match, remediation)
+                if plan_ok:
+                    return self._validate_for_promotion(match, remediation)
+                reason = plan_reason
+            return self._held(match, remediation, reason)
+
+        runner = self.executor.runner_for(match.asset.environment)
+        if runner is None:
+            return self._held(
+                match, remediation,
+                f"no runner configured for environment '{match.asset.environment}'",
             )
 
-        # Apply on staging and validate.
-        closed, notes = self.executor.apply_and_validate(match, remediation)
+        # Apply on the asset's environment and validate.
+        closed, notes = self.executor.apply_and_validate(match, remediation, runner)
         if closed:
             status = (
                 OutcomeStatus.PATCHED
@@ -96,6 +100,15 @@ class Pipeline:
             recommendations=recommendations_for(match, remediation, False, None),
         )
 
+    def _held(self, match: Match, remediation, reason: str) -> Outcome:
+        return Outcome(
+            match=match,
+            status=OutcomeStatus.NEEDS_REVIEW,
+            remediation=remediation,
+            notes=[f"held: {reason}"],
+            recommendations=recommendations_for(match, remediation, False, reason),
+        )
+
     def _promotable(self, match: Match, remediation) -> bool:
         return (
             self.promoter is not None
@@ -106,7 +119,9 @@ class Pipeline:
 
     def _validate_for_promotion(self, match: Match, remediation) -> Outcome:
         """Validate a production fix on the staging runner, then queue it."""
-        closed, notes = self.executor.apply_and_validate(match, remediation)
+        closed, notes = self.executor.apply_and_validate(
+            match, remediation, self.executor.runner
+        )
         if not closed:
             notes.append("staging validation failed; not queuing for promotion")
             return Outcome(
