@@ -69,7 +69,7 @@ def test_cli_run_writes_report(tmp_path, capsys):
 
 
 def test_static_files_are_packaged():
-    for name in ("index.html", "app.js", "app.css"):
+    for name in ("index.html", "app.js", "app.css", "logo.svg"):
         assert resources.files("fnh").joinpath("static", name).is_file()
 
 
@@ -112,7 +112,8 @@ def test_serves_page_with_security_headers(server):
     csp = resp.getheader("Content-Security-Policy")
     assert "script-src 'self'" in csp and "default-src 'none'" in csp and "unsafe-inline" not in csp
     assert resp.getheader("X-Content-Type-Options") == "nosniff"
-    for path, ctype in (("/app.js", "text/javascript"), ("/app.css", "text/css")):
+    for path, ctype in (("/app.js", "text/javascript"), ("/app.css", "text/css"),
+                        ("/logo.svg", "image/svg+xml")):
         resp, _ = _get(server, path)
         assert resp.status == 200 and resp.getheader("Content-Type").startswith(ctype)
 
