@@ -1,5 +1,7 @@
 # Friendly Neighborhood Helminth (`fnh`)
 
+[![CI](https://github.com/0xFulgrim/FNH/actions/workflows/ci.yml/badge.svg)](https://github.com/0xFulgrim/FNH/actions/workflows/ci.yml)
+
 An autonomous vulnerability-management pipeline for **your own infrastructure**.
 Like a benign gut symbiont, it lives inside your estate and quietly keeps it
 healthy — watching advisories, checking what you run, and closing gaps on
