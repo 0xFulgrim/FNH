@@ -82,7 +82,8 @@ def write_report(report: dict, directory: str | Path) -> Path:
     path = directory / f"run-{stamp.strftime('%Y%m%dT%H%M%S.%f')}Z.json"
     # Write then rename, so a dashboard reading the directory never sees half a file.
     tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(report, indent=1))
+    # Compact: reports are machine-read, and this parses noticeably faster.
+    tmp.write_text(json.dumps(report, separators=(",", ":")))
     tmp.replace(path)
     return path
 

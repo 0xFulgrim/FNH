@@ -20,6 +20,8 @@
   const SEVERITIES = ["critical", "high", "medium", "low"];
   const SEV_RANK = { low: 1, medium: 2, high: 3, critical: 4 };
   const POLL_MS = 30000;
+  // Findings rows rendered at a time; charts and counts always cover them all.
+  const PAGE_ROWS = 200;
 
   const state = {
     runs: [],
@@ -32,6 +34,7 @@
     sort: { key: "severity", dir: "desc" },
     expanded: new Set(),
     tableView: {},
+    rowLimit: PAGE_ROWS,
   };
 
   // ---- DOM helpers ------------------------------------------------------
@@ -163,7 +166,7 @@
       $("run-meta").textContent = `Dashboard server unreachable: ${err.message}`;
       return;
     }
-    const changed = runs.length !== state.runs.length || (runs[0] && state.runs[0] && runs[0].name !== state.runs[0].name);
+    const changed = runs.map((r) => r.name).join() !== state.runs.map((r) => r.name).join();
     state.runs = runs;
     $("no-reports").hidden = runs.length > 0;
     $("content").hidden = runs.length === 0;
@@ -171,8 +174,16 @@
       $("run-meta").textContent = "Waiting for reports";
       return;
     }
-    renderRunSelect();
-    if (initial || (changed && state.followLatest)) await loadAll(runs[0].name);
+    if (initial || changed) renderRunSelect();
+    if (initial || (changed && state.followLatest)) {
+      await loadAll(runs[0].name);
+    } else if (state.report) {
+      // Promotions change outside runs (fnh promote), so refresh them anyway.
+      try {
+        state.promotions = await api("/api/promotions");
+        renderPromotions();
+      } catch (_) { /* keep the last good view */ }
+    }
   }
 
   function syncFilterOptions() {
@@ -201,6 +212,7 @@
 
   // ---- Rendering ----------------------------------------------------------
   function render() {
+    state.rowLimit = PAGE_ROWS; // a new filter starts from the top
     renderMeta();
     renderKpis();
     renderCharts();
@@ -234,7 +246,7 @@
     delta.className = "tile-delta";
     const prev = previousRunFindings();
     if (!prev || state.filters.q) {
-      delta.textContent = prev ? "Search not applied to the comparison" : "First run: no comparison yet";
+      delta.textContent = prev ? "Search not applied to the comparison" : "No earlier run to compare";
     } else {
       const f = state.filters;
       const prevOpen = prev.filter((x) => passesNonStatus(f, x.severity, x.environment, x.source)
@@ -634,7 +646,7 @@
     }
 
     const frag = document.createDocumentFragment();
-    for (const o of rows) {
+    for (const o of rows.slice(0, state.rowLimit)) {
       const key = outcomeKey(o);
       const open = state.expanded.has(key);
       const g = groupOf(o.status);
@@ -656,6 +668,13 @@
         el("td", { text: o.advisory.source || "" }));
       frag.append(tr);
       if (open) frag.append(detailsRow(o));
+    }
+    const hidden = rows.length - state.rowLimit;
+    if (hidden > 0) {
+      const more = () => { state.rowLimit += PAGE_ROWS; renderFindings(); };
+      frag.append(el("tr", { class: "more-row" }, el("td", { colspan: "7" },
+        el("button", { class: "ghost-button", type: "button", onclick: more,
+          text: `Show ${Math.min(PAGE_ROWS, hidden)} more (${hidden} not shown)` }))));
     }
     body.replaceChildren(frag);
   }
@@ -757,5 +776,6 @@
   initTheme();
   bindControls();
   refreshRuns(true);
-  setInterval(() => refreshRuns(false), POLL_MS);
+  setInterval(() => { if (!document.hidden) refreshRuns(false); }, POLL_MS);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshRuns(false); });
 })();

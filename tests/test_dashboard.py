@@ -171,3 +171,119 @@ def test_dashboard_cli_warns_when_not_loopback(monkeypatch, capsys, tmp_path):
     assert "no authentication" in capsys.readouterr().err
     assert calls and calls[0][2] == "0.0.0.0"
 
+
+
+# -- host check -----------------------------------------------------------------
+
+@pytest.mark.parametrize("header,ok", [
+    ("localhost:8765", True),
+    ("127.0.0.1:8765", True),
+    ("192.0.2.10:8765", True),        # any IP literal: rebinding needs a domain name
+    ("[::1]:8765", True),
+    ("[2001:db8::1]:8765", True),
+    ("dash.internal:8765", True),     # --allow-host
+    ("DASH.INTERNAL:8765", True),
+    ("attacker.example:8765", False),
+    ("localhost:9999", False),        # wrong port
+    ("localhost", False),             # no port
+    ("", False),
+])
+def test_host_check(header, ok):
+    from fnh.dashboard import HostCheck
+    assert HostCheck(8765, "0.0.0.0", ["dash.internal"])(header) is ok
+
+
+def test_host_check_accepts_machine_name():
+    import socket
+    from fnh.dashboard import HostCheck
+    assert HostCheck(80, "0.0.0.0")(f"{socket.gethostname()}:80")
+
+
+def test_wildcard_bind_is_reachable(tmp_path):
+    # Regression: binding to 0.0.0.0 used to reject every request with 421.
+    srv = make_server(DashboardApp(tmp_path), "0.0.0.0", 0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        port = srv.server_address[1]
+        assert _get(port, "/api/runs", host=f"127.0.0.1:{port}")[0].status == 200
+        assert _get(port, "/api/runs", host=f"evil.example:{port}")[0].status == 421
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_ipv6_bind(tmp_path):
+    import socket
+    if not socket.has_ipv6:
+        pytest.skip("no IPv6")
+    try:
+        srv = make_server(DashboardApp(tmp_path), "::1", 0)
+    except OSError:
+        pytest.skip("IPv6 loopback unavailable")
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        port = srv.server_address[1]
+        conn = http.client.HTTPConnection("::1", port, timeout=5)
+        conn.request("GET", "/api/runs", headers={"Host": f"[::1]:{port}"})
+        assert conn.getresponse().status == 200
+        conn.close()
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+# -- report cache -----------------------------------------------------------------
+
+def test_cache_parses_each_report_once(tmp_path, monkeypatch):
+    import fnh.dashboard as dash
+    for day in range(1, 6):
+        write_report(_report(datetime(2026, 10, day, tzinfo=timezone.utc), [_outcome()]), tmp_path)
+    calls = []
+    real = dash.load_report
+    monkeypatch.setattr(dash, "load_report", lambda d, n: calls.append(n) or real(d, n))
+    monkeypatch.setattr(dash, "HISTORY_LIMIT", 2)
+    app = DashboardApp(tmp_path)
+    for _ in range(3):
+        app.runs()
+        app.history()  # a smaller window must not evict the others
+    assert len(calls) == 5
+
+
+def test_cache_sees_changed_and_deleted_reports(tmp_path):
+    app = DashboardApp(tmp_path)
+    first = write_report(_report(datetime(2026, 10, 1, tzinfo=timezone.utc), [_outcome()]), tmp_path)
+    second = write_report(_report(datetime(2026, 10, 2, tzinfo=timezone.utc), [_outcome()]), tmp_path)
+    assert app.runs()[0]["summary"]["total"] == 1
+    assert app.run(second.name)["summary"]["total"] == 1
+
+    # Rewritten in place (new size): served fresh, both summary and full report.
+    report = _report(datetime(2026, 10, 2, tzinfo=timezone.utc), [_outcome(), _outcome(sev=Severity.LOW)])
+    second.write_text(json.dumps(report))
+    assert app.runs()[0]["summary"]["total"] == 2
+    assert app.run(second.name)["summary"]["total"] == 2
+
+    first.unlink()
+    assert [r["name"] for r in app.runs()] == [second.name]
+    assert app.run(first.name) is None
+
+
+def test_run_rejects_bad_names_before_touching_disk(tmp_path):
+    assert DashboardApp(tmp_path).run("../../etc/passwd") is None
+
+
+# -- promotion index ----------------------------------------------------------------
+
+def test_promoter_index_dedupes_and_respects_results(tmp_path):
+    promoter = FilePromoter(tmp_path)
+    o = _outcome(OutcomeStatus.AWAITING_PROMOTION, env="production")
+    first = promoter.promote(o)
+    assert promoter.promote(o).id == first.id
+    assert len(list(tmp_path.glob("*.json"))) == 1
+
+    first.result = "applied"
+    promoter.save(first)
+    again = promoter.promote(o)  # the old one is done, so a new request is queued
+    assert again.id != first.id
+    # A fresh promoter (next run) reads the same state from disk.
+    assert FilePromoter(tmp_path).promote(o).id == again.id
+    assert not list(tmp_path.glob("*.tmp"))

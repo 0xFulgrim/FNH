@@ -183,15 +183,17 @@ static files, with no third-party scripts or fonts.
 |------|-------------|
 | `--report-dir DIR` | Reports written by `fnh run --report-dir` (required) |
 | `--promote-dir DIR` | Also show queued promotion requests |
-| `--host`, `--port` | Bind address (default `127.0.0.1:8765`) |
+| `--host`, `--port` | Bind address (default `127.0.0.1:8765`); `0.0.0.0` or `::` for all interfaces |
+| `--allow-host NAME` | Another host name the dashboard may be reached by (repeatable) |
 | `--open` | Open it in the default browser |
 
 Reports describe your infrastructure, so the server binds to `127.0.0.1` and
-has no authentication. It rejects requests addressed to any other host name,
-which stops DNS-rebinding pages from reading it through your browser, and sends
-a strict Content-Security-Policy. Advisory text from the feeds is always
-displayed as text. Binding to another address prints a warning; put it behind
-an authenticating proxy if you do.
+has no authentication. It accepts requests addressed to an IP address,
+`localhost`, the machine's own host name or an `--allow-host` name, and rejects
+any other host name, which stops DNS-rebinding pages from reading it through
+your browser. It also sends a strict Content-Security-Policy, and advisory
+text from the feeds is always displayed as text. Binding to another address
+prints a warning; put it behind an authenticating proxy if you do.
 
 ## Input formats
 
@@ -280,6 +282,8 @@ Defined in `fnh/safety.py`:
 - Steps containing `rm -rf /`, `mkfs`, `dd if=`, `> /dev/sd` or a fork bomb are refused.
 - Without a probe, a mitigation on a live host is not counted as validated.
 - SSH runs with `BatchMode=yes` and `StrictHostKeyChecking=yes` by default.
+  Commands to one host share a single connection (OpenSSH multiplexing through
+  a private control socket), so a run pays for one handshake, not one per command.
 
 ## Limitations
 

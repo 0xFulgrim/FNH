@@ -209,6 +209,8 @@ def _add_dashboard_parser(sub) -> None:
     d.add_argument("--host", default="127.0.0.1", help="address to bind (default 127.0.0.1)")
     d.add_argument("--port", type=int, default=8765)
     d.add_argument("--open", action="store_true", help="open the dashboard in a browser")
+    d.add_argument("--allow-host", action="append", default=[], metavar="NAME",
+                   help="extra host name the dashboard may be reached by (repeatable)")
 
 
 def _cmd_promote(args: argparse.Namespace) -> int:
@@ -295,7 +297,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.host not in ("127.0.0.1", "localhost", "::1"):
             print("fnh: warning: the dashboard has no authentication; anyone who can reach "
                   f"{args.host}:{args.port} can read your findings", file=sys.stderr)
-        serve(args.report_dir, args.promote_dir, args.host, args.port, args.open)
+        serve(args.report_dir, args.promote_dir, args.host, args.port, args.open, args.allow_host)
         return 0
     if args.command == "promote":
         return _cmd_promote(args)
