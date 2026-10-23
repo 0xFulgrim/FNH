@@ -69,7 +69,7 @@ fnh run --source osv --inventory inventory.json --cache .osv-cache.json
 
 # Collect packages from a staging host and remediate there
 fnh run --source osv \
-  --inventory-source live --collect pip,dpkg --dpkg-ecosystem Debian:12 \
+  --inventory-source live --collect pip,dpkg \
   --staging-host staging.internal --staging-user deploy \
   --ssh-identity ~/.ssh/fnh --ssh-known-hosts ./known_hosts
 
@@ -103,7 +103,7 @@ error stops the run with exit code 2 before anything is changed.
 | `--inventory PATH` | Inventory file for `--inventory-source file` |
 | `--collect LIST` | Live collectors: `pip`, `dpkg`, `npm` (default `pip`) |
 | `--environment NAME` | Environment label for collected assets (default `staging`) |
-| `--dpkg-ecosystem NAME` | OSV ecosystem for dpkg packages, e.g. `Debian:12` |
+| `--dpkg-ecosystem NAME` | OSV ecosystem for dpkg packages, e.g. `Debian:12` (default: detected from the host) |
 | `--mitigations PATH` | Mitigation library |
 | `--staging-host HOST` | Run steps on this host over SSH (local if omitted) |
 | `--staging-user`, `--staging-port` | SSH user and port |
@@ -131,11 +131,28 @@ fnh promote --promote-dir ./promotions --apply 3f1c9a2b7d10 --approve \
 ```
 
 Without `--approve`, `promote --apply` prints the steps and exits 1. With it,
-the steps run on the production host and the result is checked: the verify
+it needs a target: `--prod-host`, or `--local` to apply on the machine running
+`fnh`. The steps run there and the result is checked: the verify
 probe for mitigations, the installed version for patches. The rollback runs if
 either fails. The outcome is saved on the request, and an applied request
 can't be applied again. Repeated `fnh run`s reuse a pending request instead of
 queuing duplicates.
+
+### Live inventory
+
+`--inventory-source live` reads installed packages from the staging host (or
+this machine) through the same runner used for remediation:
+
+- `pip`: `pip list`, ecosystem `pypi`.
+- `npm`: `npm ls --depth=0`, ecosystem `npm`.
+- `dpkg`: one asset per *source* package, because Debian and Ubuntu advisories
+  name source packages (`openssl`), not the binaries built from them
+  (`libssl3`). Upgrades act on the installed binaries. The OSV ecosystem
+  (`Debian:12`, `Ubuntu:24.04:LTS`) is read from `/etc/os-release`; if that
+  fails the packages get the generic `os` ecosystem.
+
+PyPI names match regardless of case and `-`/`_`/`.` (so `typing_extensions`
+matches `typing-extensions`).
 
 ## Input formats
 
@@ -150,7 +167,8 @@ queuing duplicates.
 ]
 ```
 
-`cpe` is only used by the NVD source; `vendor:product` shorthand also works.
+`cpe` is only used by the NVD source. The `vendor:product` shorthand means an
+application (`cpe:2.3:a:...`); write OS and hardware CPEs in full.
 An entry with a `cpe` and no `ecosystem` gets ecosystem `cpe`: it can be
 matched, but upgrading it is left to a human.
 

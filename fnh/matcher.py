@@ -227,6 +227,15 @@ def _match_reason(advisory: Advisory, aff: dict, asset: Asset) -> str | None:
     return None
 
 
+def _package_key(ecosystem: str | None, name: str | None) -> tuple:
+    """Index key for a package. PyPI names are case-insensitive and treat
+    "-", "_" and "." alike (PEP 503), so "typing_extensions" from pip and
+    "typing-extensions" from a feed are the same package."""
+    if name is not None and (ecosystem or "").lower() == "pypi":
+        name = re.sub(r"[-_.]+", "-", name).lower()
+    return ecosystem, name
+
+
 class Matcher:
     def match(self, advisories: list[Advisory], assets: list[Asset]) -> list[Match]:
         # Index assets by package so each affected entry is a dict lookup
@@ -236,9 +245,11 @@ class Matcher:
         for asset in assets:
             if asset.ecosystem is None or asset.version is None:
                 continue
-            index.setdefault((asset.ecosystem, asset.name), []).append(asset)
-            if asset.id != asset.name:
-                index.setdefault((asset.ecosystem, asset.id), []).append(asset)
+            name_key = _package_key(asset.ecosystem, asset.name)
+            index.setdefault(name_key, []).append(asset)
+            id_key = _package_key(asset.ecosystem, asset.id)
+            if id_key != name_key:
+                index.setdefault(id_key, []).append(asset)
 
         matches: list[Match] = []
         # Feeds can return the same CVE from several databases (e.g. GHSA and
@@ -246,7 +257,7 @@ class Matcher:
         seen: set[tuple[str, str]] = set()
         for advisory in advisories:
             for aff in advisory.affected:
-                for asset in index.get((aff.get("ecosystem"), aff.get("name")), ()):
+                for asset in index.get(_package_key(aff.get("ecosystem"), aff.get("name")), ()):
                     key = (advisory.id, asset.id)
                     if key in seen:
                         continue

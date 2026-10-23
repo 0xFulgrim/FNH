@@ -1,7 +1,15 @@
 import json
 
 from fnh.executor import CommandResult
-from fnh.inventory import DpkgCollector, LiveInventory, NpmCollector, PipCollector
+import pytest
+
+from fnh.inventory import (
+    DpkgCollector,
+    LiveInventory,
+    NpmCollector,
+    PipCollector,
+    detect_os_ecosystem,
+)
 
 
 class FakeRunner:
@@ -40,13 +48,47 @@ def test_pip_collector_handles_failure():
     assert PipCollector().collect(runner, "staging") == []
 
 
-def test_dpkg_collector():
-    out = "ii \tnginx\t1.26.0\nii \topenssl\t3.0.11-1\nrc \told-pkg\t1.0\n\t\n"
+def test_dpkg_collector_groups_binaries_by_source_package():
+    out = (
+        "ii \tlibssl3\t3.0.11-1~deb12u2\topenssl\t3.0.11-1~deb12u2\n"
+        "ii \topenssl\t3.0.11-1~deb12u2\topenssl\t3.0.11-1~deb12u2\n"
+        "ii \tnginx\t1.22.1-9\tnginx\t1.22.1-9\n"
+        "rc \told-pkg\t1.0\told-pkg\t1.0\n"
+        "\t\n"
+    )
     runner = FakeRunner([("dpkg-query", _ok(out))])
-    assets = DpkgCollector(osv_ecosystem="Debian:12").collect(runner, "production")
-    names = {a.name: a.version for a in assets}
-    assert names == {"nginx": "1.26.0", "openssl": "3.0.11-1"}
-    assert all(a.ecosystem == "Debian:12" for a in assets)
+    assets = {a.name: a for a in DpkgCollector(osv_ecosystem="Debian:12").collect(runner, "production")}
+    assert set(assets) == {"openssl", "nginx"}  # removed "rc" package skipped
+    assert assets["openssl"].version == "3.0.11-1~deb12u2"
+    assert assets["openssl"].tags["binaries"] == {
+        "libssl3": "3.0.11-1~deb12u2", "openssl": "3.0.11-1~deb12u2"}
+    assert all(a.ecosystem == "Debian:12" for a in assets.values())
+
+
+@pytest.mark.parametrize("os_release,expected", [
+    ('ID=debian\nVERSION_ID="12"\nVERSION="12 (bookworm)"', "Debian:12"),
+    ('ID=ubuntu\nVERSION_ID="24.04"\nVERSION="24.04.1 LTS (Noble Numbat)"', "Ubuntu:24.04:LTS"),
+    ('ID=ubuntu\nVERSION_ID="23.10"\nVERSION="23.10 (Mantic Minotaur)"', "Ubuntu:23.10"),
+    ('ID=debian\nPRETTY_NAME="Debian GNU/Linux trixie/sid"', None),
+    ('ID=fedora\nVERSION_ID=40', None),
+])
+def test_detect_os_ecosystem(os_release, expected):
+    assert detect_os_ecosystem(os_release) == expected
+
+
+def test_dpkg_collector_detects_ecosystem_from_host():
+    runner = FakeRunner([
+        ("os-release", _ok('ID=ubuntu\nVERSION_ID="22.04"\nVERSION="22.04.4 LTS (Jammy Jellyfish)"')),
+        ("dpkg-query", _ok("ii \tcurl\t7.81.0-1ubuntu1.16\tcurl\t7.81.0-1ubuntu1.16\n")),
+    ])
+    (asset,) = DpkgCollector().collect(runner, "staging")
+    assert asset.ecosystem == "Ubuntu:22.04:LTS"
+
+
+def test_dpkg_collector_falls_back_to_generic_os():
+    runner = FakeRunner([("dpkg-query", _ok("ii \tcurl\t7.81.0\tcurl\t7.81.0\n"))])
+    (asset,) = DpkgCollector().collect(runner, "staging")
+    assert asset.ecosystem == "os"
 
 
 def test_npm_collector_parses_despite_nonzero_exit():
@@ -61,7 +103,7 @@ def test_npm_collector_parses_despite_nonzero_exit():
 def test_live_inventory_merges_collectors():
     runner = FakeRunner([
         ("pip list", _ok(json.dumps([{"name": "requests", "version": "2.31.0"}]))),
-        ("dpkg-query", _ok("ii \tnginx\t1.26.0\n")),
+        ("dpkg-query", _ok("ii \tnginx\t1.26.0\tnginx\t1.26.0\n")),
     ])
     inv = LiveInventory(runner, [PipCollector(), DpkgCollector()], environment="staging")
     assets = inv.assets()

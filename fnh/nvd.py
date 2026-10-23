@@ -24,7 +24,7 @@ from typing import Callable, Iterable, Optional
 from urllib.parse import urlencode
 
 from .feed import Feed
-from .httpclient import Response, fetch_json
+from .httpclient import FeedError, Response, fetch_json
 from .models import Advisory, Asset, Severity
 
 NVD_API = "https://services.nvd.nist.gov/rest/json/cves/2.0"
@@ -43,7 +43,7 @@ Transport = Callable[[str, dict], Response]
 Product = tuple[str, str, str]  # (part, vendor, product), lower-cased
 
 
-class NVDError(Exception):
+class NVDError(FeedError):
     pass
 
 

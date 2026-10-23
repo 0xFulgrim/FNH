@@ -119,12 +119,24 @@ def test_patch_rollback_reinstalls_previous_version():
     assert rem.rollback == ["python3 -m pip install requests==2.31.0"]
 
 
-def test_debian_asset_gets_pinned_apt_upgrade_and_downgrade_rollback():
+def test_debian_patch_upgrades_binaries_and_rolls_back_to_their_versions():
+    m = _match(eco="Debian:12", name="openssl", version="3.0.11-1~deb12u1",
+               fixed=("3.0.11-1~deb12u2",))
+    m.asset.tags["binaries"] = {"libssl3": "3.0.11-1~deb12u1", "openssl": "3.0.11-1~deb12u1"}
+    rem = Planner().plan(m)
+    assert rem.target_version == "3.0.11-1~deb12u2"
+    assert rem.steps == ["apt-get install -y --only-upgrade libssl3 openssl"]
+    assert rem.rollback == [
+        "apt-get install -y --allow-downgrades "
+        "'libssl3=3.0.11-1~deb12u1' 'openssl=3.0.11-1~deb12u1'"]  # "~" is quoted
+    assert rem.confidence == 0.9
+
+
+def test_debian_asset_without_binaries_uses_its_own_name():
     rem = Planner().plan(_match(eco="Debian:12", name="nginx", version="1.22.1-9",
                                 fixed=("1.22.1-9+deb12u1",)))
-    assert rem.steps == ["apt-get install -y --only-upgrade nginx=1.22.1-9+deb12u1"]
+    assert rem.steps == ["apt-get install -y --only-upgrade nginx"]
     assert rem.rollback == ["apt-get install -y --allow-downgrades nginx=1.22.1-9"]
-    assert rem.confidence == 0.9
 
 
 def test_unknown_ecosystem_patch_is_not_automated():
@@ -161,11 +173,14 @@ def test_version_validator_reads_npm_versions():
     assert VersionValidator().is_closed(m, rem, runner)
 
 
-def test_version_validator_reads_dpkg_versions():
-    m = _match(eco="Debian:12", name="nginx", version="1.22.1", fixed=("1.22.2",))
+def test_version_validator_reads_lowest_version_of_source_package():
+    m = _match(eco="Debian:12", name="openssl", version="3.0.11-1~deb12u1",
+               fixed=("3.0.11-1~deb12u2",))
     rem = Planner().plan(m)
-    assert VersionValidator().is_closed(m, rem, _Runner("1.22.2"))
-    assert not VersionValidator().is_closed(m, rem, _Runner("1.22.1"))
+    fixed = "ii \tlibssl3\topenssl\t3.0.11-1~deb12u2\nii \topenssl\topenssl\t3.0.11-1~deb12u2\n"
+    half = "ii \tlibssl3\topenssl\t3.0.11-1~deb12u1\nii \topenssl\topenssl\t3.0.11-1~deb12u2\n"
+    assert VersionValidator().is_closed(m, rem, _Runner(fixed))
+    assert not VersionValidator().is_closed(m, rem, _Runner(half))  # libssl3 not upgraded
     assert not VersionValidator().is_closed(m, rem, _Runner("", rc=1))
 
 
@@ -515,3 +530,100 @@ def test_feed_failure_exits_2_with_message(monkeypatch, capsys):
     monkeypatch.setattr(cli, "build_pipeline", lambda args: Boom())
     assert cli.main(["run", "--dry-run"]) == 2
     assert "advisory feed failed: NVD request failed" in capsys.readouterr().err
+
+
+# -- round 3 ------------------------------------------------------------------
+
+def test_network_failures_become_feed_errors():
+    from fnh.httpclient import FeedError, fetch_json
+    with pytest.raises(FeedError, match="127.0.0.1:1"):
+        fetch_json("http://127.0.0.1:1/")  # connection refused
+
+
+def test_non_json_200_is_a_feed_error():
+    import http.server
+    import threading
+    from fnh.httpclient import FeedError, get_json
+
+    class Html(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = b"<html>Sign in to the network</html>"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Html)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        with pytest.raises(FeedError, match="not JSON"):
+            get_json(f"http://127.0.0.1:{server.server_address[1]}/")
+    finally:
+        server.shutdown()
+
+
+def test_ghsa_next_link_with_commas_in_url():
+    from fnh.ghsa import _next_link
+    header = ('<https://api.github.com/advisories?affects=a,b&after=X>; rel="next", '
+              '<https://api.github.com/advisories?affects=a,b&before=Y>; rel="prev"')
+    assert _next_link({"link": header}) == "https://api.github.com/advisories?affects=a,b&after=X"
+
+
+def test_pypi_names_match_across_spellings():
+    adv = Advisory("CVE-N", "t", "s", Severity.HIGH, affected=[
+        {"ecosystem": "pypi", "name": "typing-extensions", "ranges": ["<99"], "fixed": ["99"]},
+        {"ecosystem": "pypi", "name": "jinja2", "ranges": ["<99"], "fixed": ["99"]}])
+    assets = [Asset("a", "typing_extensions", "package", ecosystem="pypi", version="4.0"),
+              Asset("b", "Jinja2", "package", ecosystem="pypi", version="3.0")]
+    assert {m.asset.id for m in Matcher().match([adv], assets)} == {"a", "b"}
+    # Other ecosystems stay exact.
+    npm = Advisory("CVE-M", "t", "s", Severity.HIGH, affected=[
+        {"ecosystem": "npm", "name": "Lodash", "ranges": ["<99"], "fixed": ["99"]}])
+    assert Matcher().match([npm], [Asset("c", "lodash", "package", ecosystem="npm", version="1")]) == []
+
+
+def test_dpkg_inventory_matches_osv_source_package_advisory():
+    from fnh.inventory import DpkgCollector
+    responses = {
+        "os-release": 'ID=debian\nVERSION_ID="12"\nVERSION="12 (bookworm)"',
+        "dpkg-query": "ii \tlibssl3\t3.0.11-1~deb12u1\topenssl\t3.0.11-1~deb12u1\n",
+    }
+
+    class Host:
+        def run(self, command):
+            out = next(v for k, v in responses.items() if k in command)
+            return CommandResult(command, 0, stdout=out)
+
+    assets = DpkgCollector().collect(Host(), "staging")
+    adv = parse_osv_record({"id": "DSA-1", "aliases": ["CVE-O"], "affected": [{
+        "package": {"ecosystem": "Debian:12", "name": "openssl"},
+        "ranges": [{"type": "ECOSYSTEM",
+                    "events": [{"introduced": "0"}, {"fixed": "3.0.11-1~deb12u2"}]}]}]})
+    (match,) = Matcher().match([adv], assets)
+    rem = Planner().plan(match)
+    assert rem.target_version == "3.0.11-1~deb12u2"
+    assert rem.steps == ["apt-get install -y --only-upgrade libssl3"]
+
+
+def test_promote_apply_requires_explicit_target(tmp_path, capsys):
+    from fnh.promote import PromotionRequest
+    promoter = FilePromoter(tmp_path)
+    req = PromotionRequest("CVE-1", "a", "production", "d", steps=["true"])
+    promoter.save(req)
+    code = main(["promote", "--promote-dir", str(tmp_path), "--apply", req.id, "--approve"])
+    assert code == 2
+    assert "--prod-host" in capsys.readouterr().err
+    assert promoter.load(req.id).approved is False  # nothing recorded
+
+
+def test_file_feed_accepts_severity_words(tmp_path):
+    from fnh.feed import FileFeed
+    p = tmp_path / "a.json"
+    p.write_text(json.dumps([{"id": "A", "severity": "HIGH"}, {"id": "B", "severity": "moderate"}]))
+    assert [a.severity.value for a in FileFeed(p).fetch()] == ["high", "medium"]
+    p.write_text(json.dumps([{"id": "C", "severity": "urgent"}]))
+    with pytest.raises(ValueError, match="'C'"):
+        FileFeed(p).fetch()

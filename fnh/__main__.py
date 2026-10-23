@@ -11,16 +11,15 @@ from __future__ import annotations
 
 import argparse
 import sys
-from urllib.error import URLError
 from pathlib import Path
 
 from .executor import DryRunner, Executor, ShellRunner, SSHRunner
 from .feed import Feed, FileFeed, MultiFeed
-from .ghsa import GHSAError, GHSAFeed
+from .ghsa import GHSAFeed
 from .ghsa import packages_from_inventory as ghsa_packages
 from .inventory import COLLECTORS, FileInventory, LiveInventory
-from .httpclient import HTTPStatusError
-from .nvd import NVDError, NVDFeed
+from .httpclient import FeedError
+from .nvd import NVDFeed
 from .osv import OSVCache, OSVFeed
 from .osv import packages_from_inventory as osv_packages
 from .pipeline import Pipeline
@@ -73,7 +72,7 @@ def _build_inventory(args: argparse.Namespace, runner):
         for name in names:
             if name not in COLLECTORS:
                 raise SystemExit(f"unknown collector: {name!r} (have {sorted(COLLECTORS)})")
-            kwargs = {"osv_ecosystem": args.dpkg_ecosystem} if name == "dpkg" else {}
+            kwargs = {"osv_ecosystem": args.dpkg_ecosystem} if name == "dpkg" else {}  # None: detect
             collectors.append(COLLECTORS[name](**kwargs))
         return LiveInventory(runner, collectors, environment=args.environment)
     return FileInventory(args.inventory)
@@ -160,8 +159,9 @@ def _add_run_parser(sub) -> None:
                           + ",".join(sorted(COLLECTORS)))
     inv.add_argument("--environment", default="staging",
                      help="environment label for collected assets")
-    inv.add_argument("--dpkg-ecosystem", default="Debian",
-                     help="OSV ecosystem for dpkg assets, e.g. 'Debian:12'")
+    inv.add_argument("--dpkg-ecosystem", default=None,
+                     help="OSV ecosystem for dpkg assets, e.g. 'Debian:12' "
+                          "(default: detected from the host's /etc/os-release)")
 
     staging = run.add_argument_group("remote staging (ssh)")
     staging.add_argument("--staging-host", default=None, help="run steps on this host over ssh")
@@ -187,7 +187,9 @@ def _add_promote_parser(sub) -> None:
                     help="required to actually run the promotion on production")
     pr.add_argument("--approved-by", default=None, help="who approved this promotion")
     prod = pr.add_argument_group("production target (ssh)")
-    prod.add_argument("--prod-host", default=None, help="production host (ssh); local if omitted")
+    prod.add_argument("--prod-host", default=None, help="production host (ssh)")
+    prod.add_argument("--local", action="store_true",
+                      help="apply on this machine instead of --prod-host")
     prod.add_argument("--prod-user", default=None)
     prod.add_argument("--prod-port", type=int, default=22)
     prod.add_argument("--ssh-identity", default=None)
@@ -224,13 +226,19 @@ def _cmd_promote(args: argparse.Namespace) -> int:
             print(f"  $ {step}")
         return 1
 
-    request.approved = True
-    request.approved_by = args.approved_by
+    # Without a host, the change would land on whatever machine runs fnh and
+    # be recorded as applied to production. Make "here" an explicit choice.
+    if not args.prod_host and not args.local:
+        print("fnh: --apply needs --prod-host (or --local to apply on this machine)",
+              file=sys.stderr)
+        return 2
     if args.prod_host:
         runner = _ssh_runner(args.prod_host, args.prod_user, args.prod_port,
                              args.ssh_identity, args.ssh_known_hosts, args.ssh_trust_new)
     else:
         runner = ShellRunner()
+    request.approved = True
+    request.approved_by = args.approved_by
 
     try:
         ok, notes = apply_promotion(request, runner)
@@ -258,10 +266,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "run":
         try:
             outcomes = build_pipeline(args).run()
-        except (GHSAError, NVDError, HTTPStatusError, URLError) as exc:
+        except FeedError as exc:
             # Feeds run before anything is changed, so nothing needs undoing.
-            reason = getattr(exc, "reason", None) or exc
-            print(f"fnh: advisory feed failed: {reason}", file=sys.stderr)
+            print(f"fnh: advisory feed failed: {exc}", file=sys.stderr)
             return 2
         print(summarize(outcomes))
         return 0
