@@ -132,10 +132,21 @@ def build_pipeline(args: argparse.Namespace) -> Pipeline:
         policy.autonomous_environments.add("production")
         policy.require_human_approval_for_production = False
     promoter = FilePromoter(args.promote_dir) if args.promote_dir else None
+    enricher = _build_enricher(args) if getattr(args, "enrich", False) else None
     return Pipeline(
         feed=feed, inventory=inventory, planner=planner, executor=executor,
-        policy=policy, promoter=promoter,
+        policy=policy, promoter=promoter, enricher=enricher,
     )
+
+
+def _build_enricher(args: argparse.Namespace):
+    """A review-only (advisory, asset) -> dict callable for the pipeline."""
+    from .enrich import AnthropicClient, enrich
+    client = AnthropicClient(model=args.enrich_model) if args.enrich_model else AnthropicClient()
+    allowed = set(args.allow_host) or None
+    return lambda advisory, asset: enrich(
+        advisory, asset, client, allowed_hosts=allowed, model=args.enrich_model,
+    ).to_dict()
 
 
 def _add_discovery_args(p) -> None:
@@ -173,6 +184,14 @@ def _add_run_parser(sub) -> None:
                      help="queue validated production fixes here for approval")
     run.add_argument("--report-dir", default=None,
                      help="also write a JSON report of this run here (read by `fnh dashboard`)")
+
+    enr = run.add_argument_group("enrichment (optional, calls an LLM)")
+    enr.add_argument("--enrich", action="store_true",
+                     help="attach an LLM summary and a review-only drafted probe to each "
+                          "finding (needs ANTHROPIC_API_KEY; never changes what runs)")
+    enr.add_argument("--enrich-model", default=None, help="LLM model id (default: a Claude Sonnet)")
+    enr.add_argument("--allow-host", action="append", default=[], metavar="NAME",
+                     help="a staging host a drafted probe may target without a warning (repeatable)")
 
     staging = run.add_argument_group("remote staging (ssh)")
     staging.add_argument("--staging-host", default=None, help="run steps on this host over ssh")

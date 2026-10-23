@@ -140,3 +140,6 @@ class Outcome:
     validated: bool = False
     notes: list[str] = field(default_factory=list)
     recommendations: list[str] = field(default_factory=list)
+    # Optional LLM enrichment (see enrich.py), attached for review in the
+    # report and dashboard. Never fed into planning or execution.
+    enrichment: Optional[dict] = None

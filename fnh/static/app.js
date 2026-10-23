@@ -617,7 +617,17 @@
       ? el("ul", {}, items.map((t) => el("li", { text: t })))
       : el("p", { class: "muted", text: "None" }));
     const section = (title, ...body) => el("div", {}, el("h3", { text: title }), ...body);
+    const enr = o.enrichment;
+    const enrichmentSection = enr ? section("AI summary (review only)",
+      enr.summary ? el("p", { text: enr.summary }) : null,
+      enr.trigger ? el("p", { class: "muted", text: `Trigger: ${enr.trigger}` }) : null,
+      enr.probe_command
+        ? el("div", {}, el("p", { class: "muted", text: "Suggested check — review before adding to your mitigation library:" }),
+            el("pre", {}, el("code", { text: enr.probe_command })))
+        : null,
+      enr.warnings && enr.warnings.length ? list(enr.warnings) : null) : null;
     return el("tr", { class: "details" }, el("td", { colspan: "7" }, el("div", { class: "details-grid" },
+      enrichmentSection,
       section("Why it matched", el("p", { text: o.reason || "" })),
       section("Remediation",
         rem ? el("p", { text: `${cap(rem.kind)}: ${rem.description}` }) : el("p", { class: "muted", text: "None" }),

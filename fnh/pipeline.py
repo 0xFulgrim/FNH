@@ -9,7 +9,7 @@ with next steps.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 from .executor import Executor
 from .feed import Feed
@@ -33,6 +33,10 @@ class Pipeline:
     # When set, a production fix that validates on staging is queued for
     # promotion instead of being left as a bare "needs review".
     promoter: Optional[Promoter] = None
+    # When set, (advisory, asset) -> dict is attached to each outcome for review.
+    # Deliberately applied after _handle so it can never affect the plan,
+    # the safety gate, or what the executor runs.
+    enricher: Optional[Callable[..., dict]] = None
 
     def run(self) -> list[Outcome]:
         advisories = self.feed.fetch()
@@ -41,7 +45,11 @@ class Pipeline:
 
         outcomes: list[Outcome] = []
         for match in matches:
-            outcomes.append(self._handle(match))
+            outcome = self._handle(match)
+            if self.enricher is not None:
+                # Review-only metadata; the decision above is already final.
+                outcome.enrichment = self.enricher(match.advisory, match.asset)
+            outcomes.append(outcome)
         return outcomes
 
     def _handle(self, match) -> Outcome:

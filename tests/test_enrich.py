@@ -183,3 +183,94 @@ def test_enrich_cli_reports_feed_failure(monkeypatch, capsys):
     monkeypatch.setattr(cli, "_build_feed", lambda args, inv: Boom())
     assert cli.main(["enrich", "--source", "osv"]) == 2
     assert "advisory feed failed" in capsys.readouterr().err
+
+
+# -- pipeline integration -----------------------------------------------------
+
+def _file_pipeline(enricher=None):
+    from pathlib import Path
+    from fnh.pipeline import Pipeline
+    from fnh.feed import FileFeed
+    from fnh.inventory import FileInventory
+    from fnh.planner import Planner, MitigationLibrary
+    from fnh.executor import Executor, DryRunner
+    from fnh.safety import SafetyPolicy
+    ex = Path(__file__).parent.parent / "examples"
+    return Pipeline(FileFeed(ex / "advisories.json"), FileInventory(ex / "inventory.json"),
+                    Planner(MitigationLibrary(ex / "mitigations.json")), Executor(DryRunner()),
+                    SafetyPolicy(), enricher=enricher)
+
+
+def test_pipeline_attaches_enrichment_without_affecting_outcomes():
+    base = {o.match.key if hasattr(o.match, "key") else o.match.advisory.id: o.status
+            for o in _file_pipeline().run()}
+    calls = []
+
+    def enricher(advisory, asset):
+        calls.append(advisory.id)
+        return {"summary": "S", "suggested_probe": None}
+
+    enriched = _file_pipeline(enricher).run()
+    # Same decisions as without enrichment, plus the attached data.
+    assert {o.match.advisory.id: o.status for o in enriched} == base
+    assert len(calls) == len(enriched)
+    assert all(o.enrichment == {"summary": "S", "suggested_probe": None} for o in enriched)
+
+
+def test_enricher_suggested_probe_never_reaches_the_executor():
+    from fnh.executor import CommandResult
+
+    class SpyRunner:
+        def __init__(self):
+            self.log = []
+
+        def run(self, command):
+            self.log.append(command)
+            return CommandResult(command, 0, stdout="[spy]")
+
+    # An enricher whose drafted probe, if ever executed, would be obvious.
+    def enricher(advisory, asset):
+        return {"probe_command": "touch /tmp/PWNED", "suggested_probe": {"probe": "x"}}
+
+    from pathlib import Path
+    from fnh.pipeline import Pipeline
+    from fnh.feed import FileFeed
+    from fnh.inventory import FileInventory
+    from fnh.planner import Planner, MitigationLibrary
+    from fnh.executor import Executor
+    from fnh.safety import SafetyPolicy
+    ex = Path(__file__).parent.parent / "examples"
+    spy = SpyRunner()
+    Pipeline(FileFeed(ex / "advisories.json"), FileInventory(ex / "inventory.json"),
+             Planner(MitigationLibrary(ex / "mitigations.json")), Executor(spy),
+             SafetyPolicy(), enricher=enricher).run()
+    assert not any("PWNED" in c for c in spy.log)
+
+
+def test_report_includes_enrichment():
+    from fnh.report import build_report
+    outcomes = _file_pipeline(lambda a, s: {"summary": "hello"}).run()
+    report = build_report(outcomes, sources=["file"], inventory_source="file", dry_run=True)
+    assert all(o["enrichment"] == {"summary": "hello"} for o in report["outcomes"])
+
+
+def test_run_enrich_flag_attaches_enrichment_to_report(tmp_path, monkeypatch):
+    import fnh.enrich as enrich_mod
+    from fnh.__main__ import main
+    from fnh.report import list_reports
+    import json as _json
+
+    class FixedClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def complete(self, system, user):
+            return _json.dumps({"summary": "drafted summary", "trigger": "t", "probe": None})
+
+    monkeypatch.setattr(enrich_mod, "AnthropicClient", FixedClient)
+    rc = main(["run", "--dry-run", "--enrich", "--report-dir", str(tmp_path)])
+    assert rc == 0
+    (path,) = list_reports(tmp_path)
+    report = _json.loads(path.read_text())
+    assert report["outcomes"] and all(
+        o["enrichment"]["summary"] == "drafted summary" for o in report["outcomes"])
