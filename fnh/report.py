@@ -72,6 +72,7 @@ def _outcome(o: Outcome) -> dict:
         },
         "notes": list(o.notes),
         "recommendations": list(o.recommendations),
+        "enrichment": o.enrichment,
     }
 
 

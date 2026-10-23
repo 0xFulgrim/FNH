@@ -296,6 +296,12 @@ Three things keep a drafted probe from becoming code that runs on its own:
 kept but flagged so you re-point it. Enrichment needs network and
 `ANTHROPIC_API_KEY`; the client is pluggable, so the tests run offline.
 
+`fnh run --enrich` does the same enrichment inline, attaching the summary and
+drafted probe to each finding in the report (and the dashboard's finding
+detail). It is applied after the remediation decision is already made, so it
+never changes the plan, the safety gate, or what the executor runs — the drafted
+probe is review-only there too.
+
 ## How it works
 
 1. Load advisories and inventory.
