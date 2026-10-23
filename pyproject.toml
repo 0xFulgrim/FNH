@@ -19,5 +19,8 @@ fnh = "fnh.__main__:main"
 [tool.setuptools]
 packages = ["fnh"]
 
+[tool.setuptools.package-data]
+fnh = ["static/*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

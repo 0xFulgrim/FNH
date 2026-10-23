@@ -2,6 +2,7 @@
 
     fnh run      — feed -> inventory -> match -> plan -> apply/validate -> queue
     fnh promote  — list and (with approval) apply queued production promotions
+    fnh dashboard — browse run reports in a local, read-only web dashboard
 
 Wires the reference implementations together so the whole flow is runnable
 offline. Swap in real Feed/Inventory/Runner implementations for a live deploy.
@@ -22,10 +23,12 @@ from .httpclient import FeedError
 from .nvd import NVDFeed
 from .osv import OSVCache, OSVFeed
 from .osv import packages_from_inventory as osv_packages
+from .dashboard import serve
 from .pipeline import Pipeline
 from .planner import MitigationLibrary, Planner
 from .promote import FilePromoter, PromotionRefused, apply_promotion
 from .recommend import summarize
+from .report import build_report, write_report
 from .safety import SafetyPolicy
 
 EXAMPLES = Path(__file__).parent.parent / "examples"
@@ -149,6 +152,8 @@ def _add_run_parser(sub) -> None:
                      help="change production assets directly on --prod-host")
     run.add_argument("--promote-dir", default=None,
                      help="queue validated production fixes here for approval")
+    run.add_argument("--report-dir", default=None,
+                     help="also write a JSON report of this run here (read by `fnh dashboard`)")
 
     inv = run.add_argument_group("inventory")
     inv.add_argument("--inventory-source", choices=["file", "live"], default="file")
@@ -195,6 +200,15 @@ def _add_promote_parser(sub) -> None:
     prod.add_argument("--ssh-identity", default=None)
     prod.add_argument("--ssh-known-hosts", default=None)
     prod.add_argument("--ssh-trust-new", action="store_true")
+
+
+def _add_dashboard_parser(sub) -> None:
+    d = sub.add_parser("dashboard", help="browse run reports in a local web dashboard")
+    d.add_argument("--report-dir", required=True, help="directory written by `fnh run --report-dir`")
+    d.add_argument("--promote-dir", default=None, help="also show queued promotion requests")
+    d.add_argument("--host", default="127.0.0.1", help="address to bind (default 127.0.0.1)")
+    d.add_argument("--port", type=int, default=8765)
+    d.add_argument("--open", action="store_true", help="open the dashboard in a browser")
 
 
 def _cmd_promote(args: argparse.Namespace) -> int:
@@ -261,6 +275,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     _add_run_parser(sub)
     _add_promote_parser(sub)
+    _add_dashboard_parser(sub)
 
     args = parser.parse_args(argv)
     if args.command == "run":
@@ -271,6 +286,16 @@ def main(argv: list[str] | None = None) -> int:
             print(f"fnh: advisory feed failed: {exc}", file=sys.stderr)
             return 2
         print(summarize(outcomes))
+        if args.report_dir:
+            report = build_report(outcomes, sources=args.source,
+                                  inventory_source=args.inventory_source, dry_run=args.dry_run)
+            print(f"report written to {write_report(report, args.report_dir)}", file=sys.stderr)
+        return 0
+    if args.command == "dashboard":
+        if args.host not in ("127.0.0.1", "localhost", "::1"):
+            print("fnh: warning: the dashboard has no authentication; anyone who can reach "
+                  f"{args.host}:{args.port} can read your findings", file=sys.stderr)
+        serve(args.report_dir, args.promote_dir, args.host, args.port, args.open)
         return 0
     if args.command == "promote":
         return _cmd_promote(args)
