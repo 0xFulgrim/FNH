@@ -30,6 +30,10 @@ class SafetyPolicy:
     min_confidence: float = 0.75
     # Only auto-act on advisories at/above this severity (lower ones are queued).
     min_auto_severity: Severity = Severity.HIGH
+    # Validate a production fix on the staging runner, then queue it for human
+    # approval, rather than leaving it a bare "needs review". Still never
+    # applies to production autonomously.
+    validate_production_on_staging: bool = True
 
     def may_act_automatically(self, match: Match, remediation: Remediation) -> tuple[bool, str]:
         """Return (allowed, reason). A single 'no' blocks automation."""

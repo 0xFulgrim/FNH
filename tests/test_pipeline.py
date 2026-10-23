@@ -1,19 +1,19 @@
 from pathlib import Path
 
-from vulnpilot.executor import (
+from fnh.executor import (
     ChainValidator,
     DryRunner,
     Executor,
     MitigationValidator,
     VersionValidator,
 )
-from vulnpilot.feed import FileFeed
-from vulnpilot.inventory import FileInventory
-from vulnpilot.matcher import Matcher, _cmp, _in_range
-from vulnpilot.models import OutcomeStatus
-from vulnpilot.pipeline import Pipeline
-from vulnpilot.planner import MitigationLibrary, Planner
-from vulnpilot.safety import SafetyPolicy
+from fnh.feed import FileFeed
+from fnh.inventory import FileInventory
+from fnh.matcher import Matcher, _cmp, _in_range
+from fnh.models import OutcomeStatus
+from fnh.pipeline import Pipeline
+from fnh.planner import MitigationLibrary, Planner
+from fnh.safety import SafetyPolicy
 
 EX = Path(__file__).parent.parent / "examples"
 
@@ -76,7 +76,7 @@ def test_production_requires_human_approval():
 
 
 def test_safety_blocks_forbidden_steps():
-    from vulnpilot.models import (
+    from fnh.models import (
         Advisory,
         Asset,
         Match,
@@ -95,3 +95,17 @@ def test_safety_blocks_forbidden_steps():
     allowed, reason = policy.may_act_automatically(match, bad)
     assert not allowed
     assert "forbidden" in reason
+
+
+def test_planner_builds_verify_from_probe_spec():
+    from fnh.models import Advisory, Asset, Match, Severity
+    from fnh.planner import MitigationLibrary, Planner
+
+    lib = MitigationLibrary(EX / "mitigations.json")
+    adv = Advisory("CVE-2026-0002", "t", "s", Severity.HIGH,
+                   affected=[{"ecosystem": "os", "name": "nginx"}])
+    asset = Asset("edge", "nginx", "package", ecosystem="os", version="1.26.0")
+    rem = Planner(lib).plan(Match(adv, asset, "test"))
+    # The example library's probe spec resolves into a runnable verify command.
+    assert rem.verify is not None
+    assert "curl" in rem.verify

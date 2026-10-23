@@ -8,13 +8,15 @@ This is the top-level flow described as:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 from .executor import Executor
 from .feed import Feed
 from .inventory import Inventory
 from .matcher import Matcher
-from .models import Outcome, OutcomeStatus, RemediationKind
+from .models import Match, Outcome, OutcomeStatus, RemediationKind
 from .planner import Planner
+from .promote import Promoter
 from .recommend import recommendations_for
 from .safety import SafetyPolicy
 
@@ -27,6 +29,9 @@ class Pipeline:
     executor: Executor
     policy: SafetyPolicy
     matcher: Matcher = Matcher()
+    # When set, a production fix that validates on staging is queued for
+    # promotion instead of being left as a bare "needs review".
+    promoter: Optional[Promoter] = None
 
     def run(self) -> list[Outcome]:
         advisories = self.feed.fetch()
@@ -53,6 +58,10 @@ class Pipeline:
         # Safety gate: may we act on this automatically?
         allowed, reason = self.policy.may_act_automatically(match, remediation)
         if not allowed:
+            # A production change we can't auto-apply, but could validate on a
+            # staging mirror and then queue for human approval.
+            if self._promotable(match, remediation):
+                return self._validate_for_promotion(match, remediation)
             return Outcome(
                 match=match,
                 status=OutcomeStatus.NEEDS_REVIEW,
@@ -86,3 +95,40 @@ class Pipeline:
             notes=notes,
             recommendations=recommendations_for(match, remediation, False, None),
         )
+
+    def _promotable(self, match: Match, remediation) -> bool:
+        return (
+            self.promoter is not None
+            and self.policy.validate_production_on_staging
+            and match.asset.environment == "production"
+            and remediation.kind != RemediationKind.NONE
+        )
+
+    def _validate_for_promotion(self, match: Match, remediation) -> Outcome:
+        """Validate a production fix on the staging runner, then queue it."""
+        closed, notes = self.executor.apply_and_validate(match, remediation)
+        if not closed:
+            notes.append("staging validation failed; not queuing for promotion")
+            return Outcome(
+                match=match,
+                status=OutcomeStatus.NEEDS_REVIEW,
+                remediation=remediation,
+                validated=False,
+                notes=notes,
+                recommendations=recommendations_for(match, remediation, False, None),
+            )
+
+        outcome = Outcome(
+            match=match,
+            status=OutcomeStatus.AWAITING_PROMOTION,
+            remediation=remediation,
+            validated=True,
+            notes=notes,
+        )
+        request = self.promoter.promote(outcome)
+        outcome.notes.append(f"promotion request queued: {request.id}")
+        outcome.recommendations.append(
+            f"Validated on staging. Approve promotion request {request.id} to apply "
+            f"'{remediation.description}' to production ({match.asset.id})."
+        )
+        return outcome

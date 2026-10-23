@@ -9,6 +9,14 @@
       "echo 'reverted chunked-body hardening'"
     ],
     "confidence": 0.8,
-    "verify": "probe staging edge with a malformed chunked request and expect 400"
+    "verify": {
+      "probe": "http_status",
+      "url": "https://staging.internal/",
+      "method": "POST",
+      "header": "Transfer-Encoding: chunked",
+      "data": "malformed",
+      "expect": 400,
+      "insecure": true
+    }
   }
 }

@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "vulnpilot"
+name = "fnh"
 version = "0.1.0"
-description = "Autonomous vulnerability-management pipeline: feed -> infra -> patch/mitigate -> validate on staging -> recommend"
+description = "Friendly Neighborhood Helminth: autonomous vuln-management pipeline (feed -> infra -> patch/mitigate -> validate on staging -> promote)"
 requires-python = ">=3.10"
 dependencies = []
 
@@ -13,10 +13,10 @@ dependencies = []
 dev = ["pytest>=7"]
 
 [project.scripts]
-vulnpilot = "vulnpilot.__main__:main"
+fnh = "fnh.__main__:main"
 
 [tool.setuptools]
-packages = ["vulnpilot"]
+packages = ["fnh"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
