@@ -1,6 +1,7 @@
 # FNH (Friendly Neighborhood Helminth)
 
 [![CI](https://github.com/0xFulgrim/FNH/actions/workflows/ci.yml/badge.svg)](https://github.com/0xFulgrim/FNH/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 FNH matches vulnerability advisories against the software you run, applies
 patches or mitigations on a staging host, checks that the fix worked, and
@@ -222,3 +223,7 @@ Tests use injected transports and runners, so they run without network access or
 | `cvss.py` | CVSS v3 scoring |
 | `recommend.py` | Report output |
 | `pipeline.py` | Orchestration |
+
+## License
+
+MIT. See [LICENSE](LICENSE).
