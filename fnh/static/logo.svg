@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="fnh-logo-title">
+  <title id="fnh-logo-title">Friendly Neighborhood Helminth</title>
+  <defs>
+    <!-- One S-curve drives the body, its outline, the stripes and the sheen. -->
+    <path id="fnh-body" d="M22 104 C18 82 40 70 54 84 C68 98 92 98 92 74 L92 56"/>
+  </defs>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <!-- outline -->
+    <use href="#fnh-body" stroke="#7a2140" stroke-width="31"/>
+    <!-- body -->
+    <use href="#fnh-body" stroke="#f58ba5" stroke-width="24"/>
+    <!-- segment rings: a dashed stroke as wide as the body draws bands across it -->
+    <use href="#fnh-body" stroke="#e2668a" stroke-width="24" stroke-linecap="butt"
+         pathLength="100" stroke-dasharray="2.6 6.4" stroke-dashoffset="-6"/>
+    <!-- sheen along the back -->
+    <use href="#fnh-body" stroke="#ffd3de" stroke-width="5" stroke-opacity="0.85"
+         transform="translate(-3.5 -3.5)" pathLength="100" stroke-dasharray="58 100" stroke-dashoffset="-8"/>
+  </g>
+  <!-- head -->
+  <circle cx="92" cy="44" r="25.5" fill="#7a2140"/>
+  <circle cx="92" cy="44" r="22" fill="#f58ba5"/>
+  <ellipse cx="85" cy="32" rx="9" ry="5" fill="#ffd3de" opacity="0.85" transform="rotate(-25 85 32)"/>
+  <!-- eyes -->
+  <circle cx="83" cy="42" r="7" fill="#fff" stroke="#7a2140" stroke-width="2"/>
+  <circle cx="101" cy="42" r="7" fill="#fff" stroke="#7a2140" stroke-width="2"/>
+  <circle cx="84.5" cy="43.5" r="3.6" fill="#1d1416"/>
+  <circle cx="102.5" cy="43.5" r="3.6" fill="#1d1416"/>
+  <circle cx="85.6" cy="42.2" r="1.2" fill="#fff"/>
+  <circle cx="103.6" cy="42.2" r="1.2" fill="#fff"/>
+  <!-- cheeks and smile -->
+  <ellipse cx="76" cy="54" rx="4.2" ry="2.6" fill="#e2668a" opacity="0.75"/>
+  <ellipse cx="108" cy="54" rx="4.2" ry="2.6" fill="#e2668a" opacity="0.75"/>
+  <path d="M85 54 Q92 61 99 54" fill="none" stroke="#7a2140" stroke-width="2.6" stroke-linecap="round"/>
+</svg>

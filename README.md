@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="fnh/static/logo.svg" width="128" height="128" alt="FNH logo: a cartoon worm">
+</p>
+
 # FNH (Friendly Neighborhood Helminth)
 
 [![CI](https://github.com/0xFulgrim/FNH/actions/workflows/ci.yml/badge.svg)](https://github.com/0xFulgrim/FNH/actions/workflows/ci.yml)
