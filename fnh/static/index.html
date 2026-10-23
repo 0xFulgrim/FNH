@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FNH Dashboard</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <div>
+        <h1>FNH</h1>
+        <p class="brand-sub">Friendly Neighborhood Helminth</p>
+      </div>
+    </div>
+    <p id="run-meta" class="run-meta" aria-live="polite"></p>
+    <button id="theme-toggle" class="ghost-button" type="button" aria-label="Color theme">Theme: system</button>
+  </header>
+
+  <main id="app">
+    <section class="filters" aria-label="Filters">
+      <label>Run
+        <select id="f-run"></select>
+      </label>
+      <label>Status
+        <select id="f-status">
+          <option value="open">Open</option>
+          <option value="all">All statuses</option>
+          <option value="resolved">Resolved</option>
+          <option value="awaiting">Awaiting promotion</option>
+          <option value="failed">Failed</option>
+          <option value="review">Needs review</option>
+        </select>
+      </label>
+      <label>Severity
+        <select id="f-severity">
+          <option value="all">All</option>
+          <option value="critical">Critical</option>
+          <option value="high">High and above</option>
+          <option value="medium">Medium and above</option>
+        </select>
+      </label>
+      <label>Environment
+        <select id="f-environment"><option value="all">All</option></select>
+      </label>
+      <label>Source
+        <select id="f-source"><option value="all">All</option></select>
+      </label>
+      <label class="search">Search
+        <input id="f-search" type="search" placeholder="CVE, package or asset" autocomplete="off">
+      </label>
+    </section>
+
+    <div id="content">
+      <section class="kpis" aria-label="Summary">
+        <button class="tile hero" type="button" data-status="open">
+          <span class="tile-label">Open findings</span>
+          <span class="tile-value" id="kpi-open">–</span>
+          <span class="tile-delta" id="kpi-delta"></span>
+        </button>
+        <button class="tile" type="button" data-status="resolved">
+          <span class="tile-label"><span class="status-icon s-resolved" aria-hidden="true"></span>Resolved</span>
+          <span class="tile-value" id="kpi-resolved">–</span>
+        </button>
+        <button class="tile" type="button" data-status="awaiting">
+          <span class="tile-label"><span class="status-icon s-awaiting" aria-hidden="true"></span>Awaiting promotion</span>
+          <span class="tile-value" id="kpi-awaiting">–</span>
+        </button>
+        <button class="tile" type="button" data-status="failed">
+          <span class="tile-label"><span class="status-icon s-failed" aria-hidden="true"></span>Failed</span>
+          <span class="tile-value" id="kpi-failed">–</span>
+        </button>
+        <button class="tile" type="button" data-status="review">
+          <span class="tile-label"><span class="status-icon s-review" aria-hidden="true"></span>Needs review</span>
+          <span class="tile-value" id="kpi-review">–</span>
+        </button>
+      </section>
+
+      <section class="charts">
+        <figure class="card chart-card" id="card-severity">
+          <div class="card-head">
+            <figcaption>
+              <h2>Findings by severity</h2>
+              <p class="card-sub" id="severity-sub"></p>
+            </figcaption>
+            <button class="ghost-button table-toggle" type="button" aria-pressed="false">Table</button>
+          </div>
+          <div class="legend" id="severity-legend"></div>
+          <div class="chart" id="chart-severity"></div>
+        </figure>
+
+        <figure class="card chart-card" id="card-trend">
+          <div class="card-head">
+            <figcaption>
+              <h2 id="trend-title">Open findings over runs</h2>
+              <p class="card-sub" id="trend-sub"></p>
+            </figcaption>
+            <button class="ghost-button table-toggle" type="button" aria-pressed="false">Table</button>
+          </div>
+          <div class="chart" id="chart-trend"></div>
+        </figure>
+
+        <figure class="card chart-card" id="card-assets">
+          <div class="card-head">
+            <figcaption>
+              <h2>Most affected assets</h2>
+              <p class="card-sub" id="assets-sub"></p>
+            </figcaption>
+            <button class="ghost-button table-toggle" type="button" aria-pressed="false">Table</button>
+          </div>
+          <div class="chart" id="chart-assets"></div>
+        </figure>
+      </section>
+
+      <section class="card" aria-labelledby="findings-title">
+        <div class="card-head">
+          <h2 id="findings-title">Findings</h2>
+          <p class="card-sub" id="findings-count"></p>
+        </div>
+        <div class="table-wrap">
+          <table class="data-table findings" id="findings-table">
+            <thead>
+              <tr>
+                <th scope="col"><button type="button" data-sort="severity">Severity</button></th>
+                <th scope="col"><button type="button" data-sort="advisory">Advisory</button></th>
+                <th scope="col"><button type="button" data-sort="asset">Asset</button></th>
+                <th scope="col"><button type="button" data-sort="environment">Environment</button></th>
+                <th scope="col"><button type="button" data-sort="status">Status</button></th>
+                <th scope="col">Remediation</th>
+                <th scope="col"><button type="button" data-sort="source">Source</button></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p class="empty-note" id="findings-empty" hidden>No findings match these filters.</p>
+      </section>
+
+      <section class="card" aria-labelledby="promotions-title">
+        <div class="card-head">
+          <h2 id="promotions-title">Promotion requests</h2>
+          <p class="card-sub" id="promotions-sub"></p>
+        </div>
+        <div class="table-wrap">
+          <table class="data-table" id="promotions-table">
+            <thead>
+              <tr>
+                <th scope="col">Status</th>
+                <th scope="col">Request</th>
+                <th scope="col">Advisory</th>
+                <th scope="col">Asset</th>
+                <th scope="col">Change</th>
+                <th scope="col">Created</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p class="empty-note" id="promotions-empty" hidden></p>
+      </section>
+    </div>
+
+    <section class="card empty-state" id="no-reports" hidden>
+      <h2>No reports yet</h2>
+      <p>Write a report from any run, then refresh:</p>
+      <pre><code>fnh run --source osv --report-dir REPORT_DIR</code></pre>
+      <p>New runs show up here automatically.</p>
+    </section>
+  </main>
+
+  <div id="tooltip" class="tooltip" role="status" hidden></div>
+</body>
+</html>

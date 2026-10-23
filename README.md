@@ -20,6 +20,7 @@ It is meant for infrastructure you own and operate.
 - Post-fix validation: version checks for patches, HTTP/TCP probes for mitigations
 - Automatic rollback when a step or validation fails
 - Production changes are written out as promotion requests and applied only with `--approve`
+- Optional local web dashboard for run reports (`fnh dashboard`)
 - No runtime dependencies outside the Python standard library
 
 ## Installation
@@ -114,6 +115,7 @@ error stops the run with exit code 2 before anything is changed.
 | `--allow-production` | Change production assets directly on `--prod-host` |
 | `--prod-host HOST` | Production host over SSH (required with `--allow-production`) |
 | `--prod-user`, `--prod-port` | SSH user and port for the production host |
+| `--report-dir DIR` | Also write a JSON report of the run here, for `fnh dashboard` |
 | `--dry-run` | Print commands, execute nothing |
 
 ### Promote to production
@@ -153,6 +155,43 @@ this machine) through the same runner used for remediation:
 
 PyPI names match regardless of case and `-`/`_`/`.` (so `typing_extensions`
 matches `typing-extensions`).
+
+## Dashboard
+
+An optional, read-only web view of your runs. Write a report from each run,
+then point the dashboard at the directory:
+
+```bash
+fnh run --source osv --inventory inventory.json --report-dir ./reports
+fnh dashboard --report-dir ./reports --promote-dir ./promotions --open
+```
+
+![FNH dashboard](docs/dashboard.png)
+
+It shows open findings against the previous run, findings by severity and
+status, the trend across runs, the most affected assets, a searchable findings
+table with each finding's remediation, notes and references, and the promotion
+queue. Filters at the top apply to everything on the page, every chart has a
+table view, and new runs appear without a reload. Light and dark themes follow
+the system or the toggle.
+
+The dashboard never changes anything; promotions are still applied with
+`fnh promote`. It uses only the Python standard library and serves its own
+static files, with no third-party scripts or fonts.
+
+| Flag | Description |
+|------|-------------|
+| `--report-dir DIR` | Reports written by `fnh run --report-dir` (required) |
+| `--promote-dir DIR` | Also show queued promotion requests |
+| `--host`, `--port` | Bind address (default `127.0.0.1:8765`) |
+| `--open` | Open it in the default browser |
+
+Reports describe your infrastructure, so the server binds to `127.0.0.1` and
+has no authentication. It rejects requests addressed to any other host name,
+which stops DNS-rebinding pages from reading it through your browser, and sends
+a strict Content-Security-Policy. Advisory text from the feeds is always
+displayed as text. Binding to another address prints a warning; put it behind
+an authenticating proxy if you do.
 
 ## Input formats
 
@@ -283,7 +322,9 @@ Tests use injected transports and runners, so they run without network access or
 | `promote.py` | Promotion requests |
 | `safety.py` | Safety policy |
 | `cvss.py` | CVSS v3 scoring |
-| `recommend.py` | Report output |
+| `recommend.py` | Text report |
+| `report.py` | JSON run reports |
+| `dashboard.py`, `static/` | Dashboard server and page |
 | `pipeline.py` | Orchestration |
 
 ## License
