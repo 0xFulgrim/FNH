@@ -341,6 +341,7 @@ figure { margin: 0; }
   word-break: break-word;
 }
 .empty-note { color: var(--text-secondary); padding: 12px 2px 2px; }
+.more-row td { text-align: center; padding: 12px; border-bottom: 0; }
 .empty-state { text-align: left; padding: 28px; }
 .empty-state p { color: var(--text-secondary); margin: 8px 0; }
 .cmd { font-family: var(--mono); font-size: 12px; color: var(--text-secondary); overflow-wrap: anywhere; }

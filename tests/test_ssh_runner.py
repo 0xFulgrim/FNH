@@ -71,3 +71,35 @@ def test_run_timeout_is_surfaced(monkeypatch):
     assert not result.ok
     assert result.returncode == 124
     assert "timed out" in result.stderr
+
+
+def test_multiplexing_shares_one_private_control_socket():
+    import os
+    import stat
+    runner = SSHRunner(host="h", user="u", port=2222)
+    argv1, argv2 = runner._argv("a"), runner._argv("b")
+    assert "ControlMaster=auto" in argv1 and "ControlPersist=60" in argv1
+    path = next(a for a in argv1 if a.startswith("ControlPath="))
+    assert path in argv2  # every command reuses the same master
+    directory = os.path.dirname(path.split("=", 1)[1])
+    assert stat.S_IMODE(os.stat(directory).st_mode) == 0o700
+    runner.close()
+    assert not os.path.exists(directory)
+
+
+def test_close_exits_master_with_matching_options(monkeypatch):
+    calls = []
+    runner = SSHRunner(host="h", user="u", port=2222)
+    runner._argv("x")
+    monkeypatch.setattr(subprocess, "run", lambda argv, **kw: calls.append(argv))
+    runner.close()
+    (argv,) = calls
+    assert argv[-3:] == ["-O", "exit", "u@h"]
+    assert "-p" in argv and any(a.startswith("ControlPath=") for a in argv)
+    runner.close()  # idempotent
+    assert len(calls) == 1
+
+
+def test_multiplexing_can_be_disabled():
+    argv = SSHRunner(host="h", multiplex=False)._argv("x")
+    assert not any("Control" in a for a in argv)

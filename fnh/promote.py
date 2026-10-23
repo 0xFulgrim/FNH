@@ -85,16 +85,23 @@ class FilePromoter(Promoter):
 
     def __init__(self, directory: str | Path):
         self.directory = Path(directory)
+        # (advisory, asset, steps) -> pending request; read from disk once, on
+        # first use, rather than once per promotion.
+        self._pending: Optional[dict[tuple, PromotionRequest]] = None
+
+    @staticmethod
+    def _key(request: PromotionRequest) -> tuple:
+        return request.advisory_id, request.asset_id, tuple(request.steps)
 
     def promote(self, outcome: Outcome) -> PromotionRequest:
         request = PromotionRequest.from_outcome(outcome)
+        if self._pending is None:
+            self._pending = {self._key(r): r for r in self.requests() if r.result is None}
         # Scheduled runs find the same open issue every time; reuse the request
         # that is still waiting instead of queuing a duplicate.
-        for existing in self.requests():
-            if existing.result is None and (
-                existing.advisory_id, existing.asset_id, existing.steps
-            ) == (request.advisory_id, request.asset_id, request.steps):
-                return existing
+        existing = self._pending.get(self._key(request))
+        if existing is not None:
+            return existing
         self.directory.mkdir(parents=True, exist_ok=True)
         self.save(request)
         return request
@@ -109,7 +116,17 @@ class FilePromoter(Promoter):
         return PromotionRequest.from_dict(json.loads(self._path(request_id).read_text()))
 
     def save(self, request: PromotionRequest) -> None:
-        self._path(request.id).write_text(json.dumps(request.to_dict(), indent=2))
+        path = self._path(request.id)
+        # Write then rename, so a reader (fnh promote, the dashboard) never
+        # sees half a file.
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(request.to_dict(), indent=2))
+        tmp.replace(path)
+        if self._pending is not None:
+            if request.result is None:
+                self._pending[self._key(request)] = request
+            else:
+                self._pending.pop(self._key(request), None)
 
     def requests(self) -> list[PromotionRequest]:
         if not self.directory.exists():

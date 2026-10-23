@@ -12,9 +12,13 @@ shell out. Production is only touched through an explicit production runner.
 
 from __future__ import annotations
 
+import atexit
 import json
+import os
 import shlex
+import shutil
 import subprocess
+import tempfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from functools import cmp_to_key
@@ -90,6 +94,11 @@ class SSHRunner(CommandRunner):
     Intended for staging only. Combined with SafetyPolicy (which restricts
     autonomous changes to staging environments and vets every step), this
     runner never reaches production on its own.
+
+    Commands share one connection (OpenSSH multiplexing) through a control
+    socket in a private temporary directory, so a run pays for one SSH
+    handshake instead of one per command. The master connection closes when
+    the process exits. Set `multiplex=False` to open a connection per command.
     """
 
     host: str
@@ -102,12 +111,39 @@ class SSHRunner(CommandRunner):
     connect_timeout: int = 15
     timeout: int = 300
     extra_opts: list[str] = field(default_factory=list)
+    multiplex: bool = True
+    control_persist: int = 60  # seconds the shared connection outlives its last use
+    _control_dir: str | None = field(default=None, init=False, repr=False)
 
     @property
     def target(self) -> str:
         return f"{self.user}@{self.host}" if self.user else self.host
 
+    def _control_path(self) -> str:
+        if self._control_dir is None:
+            # mkdtemp is private (0700): nobody else can use our socket.
+            self._control_dir = tempfile.mkdtemp(prefix="fnh-ssh-")
+            atexit.register(self.close)
+        # %C is a hash of host, port and user: short enough for a socket path.
+        return os.path.join(self._control_dir, "%C")
+
+    def close(self) -> None:
+        """Close the shared connection, if one was opened."""
+        if self._control_dir is None:
+            return
+        try:
+            subprocess.run(self._options() + ["-O", "exit", self.target],
+                           capture_output=True, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        shutil.rmtree(self._control_dir, ignore_errors=True)
+        self._control_dir = None
+
     def _argv(self, command: str) -> list[str]:
+        # The remote command is one argv element; ssh runs it via the remote shell.
+        return self._options() + [self.target, command]
+
+    def _options(self) -> list[str]:
         argv = [
             "ssh",
             "-o", "BatchMode=yes",  # never block on a password/passphrase prompt
@@ -120,9 +156,13 @@ class SSHRunner(CommandRunner):
             argv += ["-i", self.identity_file, "-o", "IdentitiesOnly=yes"]
         if self.port != 22:
             argv += ["-p", str(self.port)]
+        if self.multiplex:
+            argv += [
+                "-o", "ControlMaster=auto",
+                "-o", f"ControlPath={self._control_path()}",
+                "-o", f"ControlPersist={self.control_persist}",
+            ]
         argv += list(self.extra_opts)
-        # The remote command is one argv element; ssh runs it via the remote shell.
-        argv += [self.target, command]
         return argv
 
     def run(self, command: str) -> CommandResult:
