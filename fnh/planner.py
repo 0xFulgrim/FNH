@@ -118,13 +118,15 @@ class Planner:
             return [f"python3 -m pip install {shlex.quote(f'{name}=={version}')}"]
         if eco == "npm":
             return [f"npm install {shlex.quote(f'{name}@{version}')}"]
-        if eco == "os":
-            # Advisory versions for a generic "os" asset are not distro package
-            # versions, so upgrade to whatever the archive offers.
-            if upgrade:
-                return [f"apt-get install -y --only-upgrade {shlex.quote(name)}"]
-            return [f"apt-get install -y --allow-downgrades {shlex.quote(f'{name}={version}')}"]
         if is_apt_ecosystem(eco):
-            flag = "--only-upgrade" if upgrade else "--allow-downgrades"
-            return [f"apt-get install -y {flag} {shlex.quote(f'{name}={version}')}"]
+            # Debian/Ubuntu assets are source packages; the installable units
+            # are the binary packages built from them (see DpkgCollector).
+            binaries = match.asset.tags.get("binaries") or {name: match.asset.version}
+            if upgrade:
+                # Unpinned: binary versions can differ from the source version
+                # (binNMUs), and the validator checks the result afterwards.
+                names = " ".join(shlex.quote(b) for b in binaries)
+                return [f"apt-get install -y --only-upgrade {names}"]
+            pins = " ".join(shlex.quote(f"{b}={v}") for b, v in binaries.items() if v)
+            return [f"apt-get install -y --allow-downgrades {pins}"] if pins else []
         return []

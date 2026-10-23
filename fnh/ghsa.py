@@ -19,7 +19,7 @@ from typing import Callable, Iterable, Optional
 from urllib.parse import quote, urlencode
 
 from .feed import Feed
-from .httpclient import Response, fetch_json
+from .httpclient import FeedError, Response, fetch_json
 from .models import Advisory, Asset, Severity
 
 GITHUB_API = "https://api.github.com"
@@ -50,7 +50,7 @@ _MAX_RETRY_AFTER = 60
 Transport = Callable[[str, dict], Response]
 
 
-class GHSAError(Exception):
+class GHSAError(FeedError):
     pass
 
 
@@ -126,11 +126,10 @@ def parse_ghsa_advisory(raw: dict) -> Advisory:
 
 
 def _next_link(headers: dict) -> Optional[str]:
-    for part in headers.get("link", "").split(","):
-        m = re.match(r'\s*<([^>]+)>\s*;\s*rel="next"', part)
-        if m:
-            return m.group(1)
-    return None
+    # Match on the whole header: the URLs themselves can contain commas
+    # (`affects=a,b`), so splitting on "," would cut a link apart.
+    m = re.search(r'<([^>]+)>\s*;\s*rel="next"', headers.get("link", ""))
+    return m.group(1) if m else None
 
 
 class GHSAFeed(Feed):

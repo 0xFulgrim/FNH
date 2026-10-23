@@ -13,7 +13,7 @@ import json
 import shlex
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Protocol
+from typing import Optional, Protocol
 
 from .models import Asset
 
@@ -90,43 +90,83 @@ class PipCollector(Collector):
         ]
 
 
+def detect_os_ecosystem(os_release: str) -> Optional[str]:
+    """OSV ecosystem for a host from its /etc/os-release, e.g. "Debian:12" or
+    "Ubuntu:24.04:LTS" (OSV marks Ubuntu LTS releases). None if unknown."""
+    fields = {}
+    for line in os_release.splitlines():
+        key, sep, value = line.partition("=")
+        if sep:
+            fields[key.strip()] = value.strip().strip('"')
+    distro, release = fields.get("ID", "").lower(), fields.get("VERSION_ID", "")
+    if not release:
+        return None
+    if distro == "debian":
+        return f"Debian:{release.split('.')[0]}"
+    if distro == "ubuntu":
+        lts = ":LTS" if "LTS" in fields.get("VERSION", "") else ""
+        return f"Ubuntu:{release}{lts}"
+    return None
+
+
 class DpkgCollector(Collector):
     """Installed Debian/Ubuntu OS packages via `dpkg-query`.
 
-    OS packages need an OSV ecosystem like "Debian:12" or "Ubuntu:22.04" to
-    match advisories, so pass the one for the host's distro release.
+    Debian and Ubuntu advisories name *source* packages (openssl, glibc),
+    while hosts install *binary* packages built from them (libssl3, libc6).
+    Assets are therefore one per source package, with the installed binaries
+    and their versions in `tags["binaries"]` for the upgrade commands.
+
+    The OSV ecosystem ("Debian:12", "Ubuntu:24.04:LTS") is read from the
+    host's /etc/os-release unless given. If it can't be determined, assets get
+    the generic "os" ecosystem, which file advisories can still match.
     """
 
-    def __init__(self, osv_ecosystem: str = "Debian"):
+    def __init__(self, osv_ecosystem: Optional[str] = None):
         self.osv_ecosystem = osv_ecosystem
 
     def collect(self, runner: _Runner, environment: str) -> list[Asset]:
-        result = runner.run(
-            r"dpkg-query -W -f='${db:Status-Abbrev}\t${Package}\t${Version}\n'"
-        )
+        ecosystem = self.osv_ecosystem
+        if ecosystem is None:
+            release = runner.run("cat /etc/os-release")
+            ecosystem = (detect_os_ecosystem(release.stdout) if release.ok else None) or "os"
+        result = runner.run(DPKG_QUERY)
         if not result.ok:
             return []
-        assets: list[Asset] = []
+
+        # source package -> (source version, {binary: binary version})
+        sources: dict[str, tuple[str, dict[str, str]]] = {}
         for line in result.stdout.splitlines():
-            fields = line.split("\t")
-            if len(fields) != 3:
+            fields = [f.strip() for f in line.split("\t")]
+            if len(fields) != 5:
                 continue
-            status, name, version = (f.strip() for f in fields)
+            status, binary, version, source, source_version = fields
             # Only "ii" is installed; "rc" etc. are removed packages whose
             # config files remain and would show up as false positives.
-            if not name or not status.startswith("ii"):
+            if not binary or not status.startswith("ii"):
                 continue
-            assets.append(
-                Asset(
-                    id=f"{environment}:os:{name}",
-                    name=name,
-                    kind="package",
-                    ecosystem=self.osv_ecosystem,
-                    version=version or None,
-                    environment=environment,
-                )
+            source = source or binary
+            _, binaries = sources.setdefault(source, (source_version or version, {}))
+            binaries[binary] = version
+
+        return [
+            Asset(
+                id=f"{environment}:os:{source}",
+                name=source,
+                kind="package",
+                ecosystem=ecosystem,
+                version=version or None,
+                environment=environment,
+                tags={"binaries": binaries},
             )
-        return assets
+            for source, (version, binaries) in sources.items()
+        ]
+
+
+DPKG_QUERY = (
+    r"dpkg-query -W -f='${db:Status-Abbrev}\t${Package}\t${Version}"
+    r"\t${source:Package}\t${source:Version}\n'"
+)
 
 
 class NpmCollector(Collector):

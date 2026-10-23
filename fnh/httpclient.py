@@ -7,10 +7,12 @@ transports built on these helpers, so tests never touch the network.
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import ssl
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -32,7 +34,12 @@ class Response:
         return 200 <= self.status < 300
 
 
-class HTTPStatusError(Exception):
+class FeedError(Exception):
+    """An advisory source could not be read. Feeds raise this (or a subclass)
+    for HTTP errors and network failures alike, so callers handle one type."""
+
+
+class HTTPStatusError(FeedError):
     def __init__(self, url: str, response: Response):
         super().__init__(f"HTTP {response.status} from {url}")
         self.response = response
@@ -68,8 +75,8 @@ def fetch_json(
     timeout: int = 30,
 ) -> Response:
     """Send a request and decode a JSON body. HTTP errors come back as a
-    Response with the error status rather than raising; network failures
-    still raise."""
+    Response with the error status; network failures (DNS, refused or reset
+    connections, timeouts, truncated bodies) raise FeedError."""
     all_headers = {"User-Agent": USER_AGENT, "Accept": "application/json", **(headers or {})}
     data = None
     if payload is not None:
@@ -81,6 +88,10 @@ def fetch_json(
             status, body, resp_headers = resp.status, resp.read(), resp.headers
     except urllib.error.HTTPError as exc:
         status, body, resp_headers = exc.code, exc.read(), exc.headers
+    except (OSError, http.client.HTTPException) as exc:
+        # URLError, TimeoutError, ConnectionResetError, IncompleteRead, ...
+        reason = getattr(exc, "reason", None) or exc
+        raise FeedError(f"{urllib.parse.urlsplit(url).netloc}: {reason}") from exc
     try:
         decoded = json.loads(body.decode("utf-8")) if body else None
     except (UnicodeDecodeError, json.JSONDecodeError):
@@ -90,15 +101,18 @@ def fetch_json(
 
 def get_json(url: str, headers: Optional[dict[str, str]] = None) -> Any:
     """GET and return the decoded body, raising HTTPStatusError on non-2xx."""
-    resp = fetch_json(url, headers=headers)
-    if not resp.ok:
-        raise HTTPStatusError(url, resp)
-    return resp.data
+    return _checked(url, fetch_json(url, headers=headers))
 
 
 def post_json(url: str, payload: Any) -> Any:
     """POST JSON and return the decoded body, raising HTTPStatusError on non-2xx."""
-    resp = fetch_json(url, method="POST", payload=payload)
+    return _checked(url, fetch_json(url, method="POST", payload=payload))
+
+
+def _checked(url: str, resp: Response) -> Any:
     if not resp.ok:
         raise HTTPStatusError(url, resp)
+    if resp.data is None:
+        # e.g. an HTML page from a captive portal or intercepting proxy
+        raise FeedError(f"{urllib.parse.urlsplit(url).netloc}: response was not JSON")
     return resp.data

@@ -17,6 +17,7 @@ import shlex
 import subprocess
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from functools import cmp_to_key
 
 from .matcher import _cmp
 from .models import Match, Remediation, RemediationKind
@@ -164,7 +165,20 @@ def installed_version(ecosystem: str | None, name: str, runner: CommandRunner) -
             return None
         return (deps.get(name) or {}).get("version")
     elif is_apt_ecosystem(ecosystem):
-        r = runner.run(f"dpkg-query -W -f='${{Version}}' {quoted}")
+        # `name` is a source package (see DpkgCollector). Every installed
+        # binary built from it must be fixed, so report the lowest version.
+        r = runner.run(
+            r"dpkg-query -W -f='${db:Status-Abbrev}\t${Package}\t${source:Package}"
+            r"\t${source:Version}\n'"
+        )
+        if not r.ok:
+            return None
+        versions = []
+        for line in r.stdout.splitlines():
+            fields = [f.strip() for f in line.split("\t")]
+            if len(fields) == 4 and fields[0].startswith("ii") and name in (fields[1], fields[2]):
+                versions.append(fields[3])
+        return min(versions, key=cmp_to_key(lambda a, b: _cmp(a, b, ecosystem)), default=None)
     else:
         return None
     if not r.ok:

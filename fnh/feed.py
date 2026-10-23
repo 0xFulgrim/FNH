@@ -25,11 +25,11 @@ class Feed(ABC):
 
 def _parse_advisory(raw: dict) -> Advisory:
     cvss = raw.get("cvss")
-    severity = (
-        Severity(raw["severity"])
-        if raw.get("severity")
-        else Severity.from_cvss(float(cvss or 0))
-    )
+    severity = Severity.from_label(raw.get("severity"))
+    if severity is None:
+        if raw.get("severity"):
+            raise ValueError(f"advisory {raw.get('id')!r}: unknown severity {raw['severity']!r}")
+        severity = Severity.from_cvss(float(cvss or 0))
     published = None
     if raw.get("published"):
         published = datetime.fromisoformat(raw["published"].replace("Z", "+00:00"))
