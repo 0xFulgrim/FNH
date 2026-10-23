@@ -19,6 +19,18 @@ class Severity(str, Enum):
     CRITICAL = "critical"
 
     @classmethod
+    def from_label(cls, label: object) -> Optional["Severity"]:
+        """Map a feed's severity word ("MODERATE", "high", ...) or None."""
+        word = str(label or "").strip().lower()
+        return {
+            "low": cls.LOW,
+            "moderate": cls.MEDIUM,
+            "medium": cls.MEDIUM,
+            "high": cls.HIGH,
+            "critical": cls.CRITICAL,
+        }.get(word)
+
+    @classmethod
     def from_cvss(cls, score: float) -> "Severity":
         if score >= 9.0:
             return cls.CRITICAL
@@ -65,6 +77,8 @@ class Asset:
     version: Optional[str] = None
     environment: str = "production"  # "staging" | "production" | ...
     tags: dict = field(default_factory=dict)
+    # NVD product identifier, e.g. "cpe:2.3:a:nginx:nginx" or "nginx:nginx".
+    cpe: Optional[str] = None
 
 
 @dataclass

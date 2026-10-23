@@ -18,22 +18,18 @@ covering several packages matches each of them correctly.
 from __future__ import annotations
 
 import json
-import os
-import ssl
-import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
 from .cvss import base_score
 from .feed import Feed
+from .httpclient import get_json, post_json
 from .matcher import _in_range
 from .models import Advisory, Asset, Severity
 
 OSV_API = "https://api.osv.dev"
-_PROXY_CA_BUNDLE = "/root/.ccr/ca-bundle.crt"
 
 # Our inventory's ecosystem labels -> OSV's canonical ecosystem names.
 ECOSYSTEM_MAP = {
@@ -51,15 +47,6 @@ ECOSYSTEM_MAP = {
 
 PostTransport = Callable[[str, dict], dict]
 GetTransport = Callable[[str], dict]
-
-_SEVERITY_WORDS = {
-    "LOW": Severity.LOW,
-    "MODERATE": Severity.MEDIUM,
-    "MEDIUM": Severity.MEDIUM,
-    "HIGH": Severity.HIGH,
-    "CRITICAL": Severity.CRITICAL,
-}
-
 
 # Reverse: OSV name -> inventory label, so parsed advisories speak the same
 # ecosystem vocabulary the inventory uses (e.g. "PyPI" -> "pypi").
@@ -98,42 +85,6 @@ def packages_from_inventory(assets: Iterable[Asset]) -> list[tuple[str, str]]:
             seen.add(key)
             pairs.append(key)
     return pairs
-
-
-def _ssl_context() -> ssl.SSLContext:
-    ctx = ssl.create_default_context()
-    # The agent proxy may terminate TLS; trust its CA bundle when present.
-    if os.path.exists(_PROXY_CA_BUNDLE):
-        try:
-            ctx.load_verify_locations(_PROXY_CA_BUNDLE)
-        except ssl.SSLError:
-            pass
-    return ctx
-
-
-@lru_cache(maxsize=1)
-def _opener() -> urllib.request.OpenerDirector:
-    # Built once: loading the CA bundle is the expensive part.
-    # ProxyHandler() with no args reads HTTP(S)_PROXY from the environment.
-    return urllib.request.build_opener(
-        urllib.request.ProxyHandler(),
-        urllib.request.HTTPSHandler(context=_ssl_context()),
-    )
-
-
-def _http_post(url: str, payload: dict, timeout: int = 20) -> dict:
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url, data=data, headers={"Content-Type": "application/json"}, method="POST"
-    )
-    with _opener().open(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
-
-
-def _http_get(url: str, timeout: int = 20) -> dict:
-    req = urllib.request.Request(url, method="GET")
-    with _opener().open(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
 
 
 def _ranges_to_constraints(affected: dict) -> tuple[list[str], list[str]]:
@@ -182,10 +133,9 @@ def _ranges_to_constraints(affected: dict) -> tuple[list[str], list[str]]:
 
 
 def _resolve_severity(record: dict, cvss: Optional[float]) -> Severity:
-    db = record.get("database_specific", {})
-    word = str(db.get("severity", "")).upper()
-    if word in _SEVERITY_WORDS:
-        return _SEVERITY_WORDS[word]
+    label = Severity.from_label(record.get("database_specific", {}).get("severity"))
+    if label is not None:
+        return label
     if cvss is not None:
         return Severity.from_cvss(cvss)
     return Severity.MEDIUM
@@ -318,8 +268,8 @@ class OSVFeed(Feed):
         self.base_url = base_url.rstrip("/")
         self.cache = cache
         self.batch = batch
-        self._post: PostTransport = transport or _http_post
-        self._get: GetTransport = get_transport or _http_get
+        self._post: PostTransport = transport or post_json
+        self._get: GetTransport = get_transport or get_json
 
     def fetch(self) -> list[Advisory]:
         records = self._fetch_batch() if self.batch else self._fetch_single()

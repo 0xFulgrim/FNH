@@ -58,3 +58,14 @@ class FileFeed(Feed):
         data = json.loads(self.path.read_text())
         items: Iterable[dict] = data if isinstance(data, list) else data.get("advisories", [])
         return [_parse_advisory(raw) for raw in items]
+
+
+class MultiFeed(Feed):
+    """Concatenate several feeds. When two report the same CVE for the same
+    asset, the matcher keeps the first, so list the most precise feed first."""
+
+    def __init__(self, feeds: list[Feed]):
+        self.feeds = feeds
+
+    def fetch(self) -> list[Advisory]:
+        return [advisory for feed in self.feeds for advisory in feed.fetch()]
