@@ -15,6 +15,7 @@ shell out.
 
 from __future__ import annotations
 
+import json
 import shlex
 import subprocess
 from abc import ABC, abstractmethod
@@ -22,6 +23,7 @@ from dataclasses import dataclass, field
 
 from .matcher import _cmp
 from .models import Match, Remediation, RemediationKind
+from .planner import is_apt_ecosystem
 
 
 @dataclass
@@ -156,23 +158,34 @@ class VersionValidator(Validator):
         if remediation.kind != RemediationKind.PATCH or not remediation.target_version:
             # Nothing version-based to assert; defer to another validator.
             return False
+        # Under dry-run there is no live target to query; assume the planned
+        # version was installed so the flow validates end to end.
+        if isinstance(runner, DryRunner):
+            return True
         installed = self._installed_version(match, runner)
         if installed is None:
             return False
-        return _cmp(installed, remediation.target_version) >= 0
+        return _cmp(installed, remediation.target_version, match.asset.ecosystem) >= 0
 
     @staticmethod
     def _installed_version(match: Match, runner: CommandRunner) -> str | None:
-        # Under dry-run there is no live target to query; report the version the
-        # patch would have produced so the flow validates end to end.
-        if isinstance(runner, DryRunner):
-            return match.advisory.fixed_versions[0] if match.advisory.fixed_versions else None
-        eco, name = match.asset.ecosystem, match.asset.name
+        eco, name = match.asset.ecosystem, shlex.quote(match.asset.name)
         if eco == "pypi":
-            r = runner.run(f"pip show {name} | awk '/^Version:/ {{print $2}}'")
-            return r.stdout.strip() or None
-        # Other ecosystems: extend as needed.
-        return None
+            r = runner.run(f"python3 -m pip show {name} | awk '/^Version:/ {{print $2}}'")
+        elif eco == "npm":
+            r = runner.run(f"npm ls {name} --json --depth=0")
+            try:
+                deps = json.loads(r.stdout or "{}").get("dependencies", {}) or {}
+            except json.JSONDecodeError:
+                return None
+            return (deps.get(match.asset.name) or {}).get("version")
+        elif is_apt_ecosystem(eco):
+            r = runner.run(f"dpkg-query -W -f='${{Version}}' {name}")
+        else:
+            return None
+        if not r.ok:
+            return None
+        return r.stdout.strip() or None
 
 
 class MitigationValidator(Validator):
@@ -227,29 +240,53 @@ class ChainValidator(Validator):
 
 
 class Executor:
-    def __init__(self, runner: CommandRunner, validator: Validator):
+    def __init__(
+        self,
+        runner: CommandRunner,
+        validator: Validator,
+        production_runner: CommandRunner | None = None,
+    ):
+        # `runner` is the staging runner. Production assets are only acted on
+        # directly when a separate production runner is supplied.
         self.runner = runner
         self.validator = validator
+        self.production_runner = production_runner
 
-    def apply_and_validate(self, match: Match, remediation: Remediation) -> tuple[bool, list[str]]:
-        """Apply steps on staging, then validate. Returns (closed, notes)."""
+    def runner_for(self, environment: str) -> CommandRunner | None:
+        if environment == "production":
+            return self.production_runner
+        return self.runner
+
+    def apply_and_validate(
+        self,
+        match: Match,
+        remediation: Remediation,
+        runner: CommandRunner | None = None,
+    ) -> tuple[bool, list[str]]:
+        """Apply steps via `runner` (staging by default), then validate."""
+        runner = runner or self.runner
         notes: list[str] = []
+        if not remediation.steps:
+            notes.append("no automated steps for this remediation")
+            return False, notes
         for step in remediation.steps:
-            result = self.runner.run(step)
+            result = runner.run(step)
             notes.append(f"$ {step} -> rc={result.returncode}")
             if not result.ok:
                 notes.append(f"  step failed: {result.stderr.strip()[:200]}")
-                self._rollback(remediation, notes)
+                self._rollback(remediation, notes, runner)
                 return False, notes
 
-        closed = self.validator.is_closed(match, remediation, self.runner)
+        closed = self.validator.is_closed(match, remediation, runner)
         notes.append(f"validation: {'closed' if closed else 'STILL OPEN'}")
         if not closed:
-            # Remediation did not hold on staging; undo it so staging is clean.
-            self._rollback(remediation, notes)
+            # Remediation did not hold; undo it so the host is left as found.
+            self._rollback(remediation, notes, runner)
         return closed, notes
 
-    def _rollback(self, remediation: Remediation, notes: list[str]) -> None:
+    def _rollback(self, remediation: Remediation, notes: list[str], runner: CommandRunner) -> None:
+        if not remediation.rollback:
+            notes.append("no rollback defined; host left as modified")
         for step in remediation.rollback:
-            result = self.runner.run(step)
+            result = runner.run(step)
             notes.append(f"rollback $ {step} -> rc={result.returncode}")

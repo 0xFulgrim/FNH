@@ -11,6 +11,7 @@ marked approved.
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 from abc import ABC, abstractmethod
@@ -81,6 +82,9 @@ class FilePromoter(Promoter):
         return request
 
     def _path(self, request_id: str) -> Path:
+        # IDs come from the command line; keep them from escaping the directory.
+        if not re.fullmatch(r"[0-9a-f]{1,32}", request_id):
+            raise ValueError(f"invalid promotion request id: {request_id!r}")
         return self.directory / f"{request_id}.json"
 
     def load(self, request_id: str) -> PromotionRequest:

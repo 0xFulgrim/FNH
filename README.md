@@ -94,7 +94,9 @@ fnh run --source osv --inventory inventory.json --promote-dir ./promotions
 | `--ssh-known-hosts PATH` | Pinned known_hosts file |
 | `--ssh-trust-new` | Accept unknown host keys on first connect |
 | `--promote-dir DIR` | Write promotion requests here |
-| `--allow-production` | Let the pipeline change production assets directly |
+| `--allow-production` | Change production assets directly on `--prod-host` |
+| `--prod-host HOST` | Production host over SSH (required with `--allow-production`) |
+| `--prod-user`, `--prod-port` | SSH user and port for the production host |
 | `--dry-run` | Print commands, execute nothing |
 
 ### Promote to production
@@ -184,7 +186,9 @@ Outcome states: `patched`, `mitigated`, `awaiting_promotion`, `needs_review`, `f
 Defined in `fnh/safety.py`:
 
 - Steps run automatically only for `staging` assets.
-- Production needs approval through `fnh promote`, unless `--allow-production` is set.
+- Production needs approval through `fnh promote`, unless `--allow-production` is
+  set with a `--prod-host`. Production commands never run on the staging host.
+- The plan checks below also apply to fixes validated on staging for promotion.
 - Plans need confidence of at least 0.75 and severity of at least `high`.
 - Steps containing `rm -rf /`, `mkfs`, `dd if=`, `> /dev/sd` or a fork bomb are refused.
 - Without a probe, a mitigation on a live host is not counted as validated.
@@ -192,8 +196,11 @@ Defined in `fnh/safety.py`:
 
 ## Limitations
 
-- Version comparison handles dotted numeric versions only. Debian epochs and
-  pre-release tags are not compared correctly.
+- Debian and Ubuntu versions use dpkg ordering. Other ecosystems compare the
+  leading dotted numeric part only, so pre-releases like `1.0rc1` compare equal
+  to `1.0`.
+- Automated patching covers pip, npm and apt. Other ecosystems get a plan that
+  needs a human.
 - CVSS v4 vectors are not scored. FNH falls back to the severity label in the
   OSV record.
 - Inventory entries with a generic `os` ecosystem are skipped for OSV lookups.

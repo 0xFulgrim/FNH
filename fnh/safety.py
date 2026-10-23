@@ -42,7 +42,10 @@ class SafetyPolicy:
             if env == "production" and self.require_human_approval_for_production:
                 return False, "production change requires human approval"
             return False, f"environment '{env}' not in autonomous set"
+        return self.check_plan(match, remediation)
 
+    def check_plan(self, match: Match, remediation: Remediation) -> tuple[bool, str]:
+        """Checks on the plan itself, independent of where it would run."""
         if remediation.confidence < self.min_confidence:
             return False, (
                 f"confidence {remediation.confidence:.2f} < "
