@@ -24,6 +24,7 @@ It is meant for infrastructure you own and operate.
 - Post-fix validation: version checks for patches, HTTP/TCP probes for mitigations
 - Automatic rollback when a step or validation fails
 - Production changes are written out as promotion requests and applied only with `--approve`
+- Optional LLM enrichment that drafts a review-only verify probe per finding (`fnh enrich`)
 - Optional local web dashboard for run reports (`fnh dashboard`)
 - No runtime dependencies outside the Python standard library
 
@@ -258,8 +259,42 @@ or a shell command. Exit status 0 means the issue is closed.
 |-------|-------------|--------|
 | `http_status` | Response code equals `expect` | `url`, `expect`, `method`, `header`, `data`, `insecure`, `timeout` |
 | `http_header_absent` | Response lacks `header` | `url`, `header`, `insecure`, `timeout` |
+| `http_header_present` | Response carries `header` | `url`, `header`, `insecure`, `timeout` |
+| `http_body_lacks` | Body no longer contains `marker` (literal) | `url`, `marker`, `insecure`, `timeout` |
+| `response_under` | Request finishes within `timeout`s | `url`, `timeout`, `insecure` |
 | `port_closed` | TCP connect fails | `host`, `port`, `timeout` |
 | `command_fails` | `cmd` exits non-zero | `cmd` |
+
+Every probe but `command_fails` is a bounded template that only fills in
+parameters, never shell. `command_fails` and a raw-string `verify` are the two
+escape hatches that run arbitrary shell.
+
+## Advisory enrichment (optional, LLM-drafted probes)
+
+`fnh enrich` reads the same sources and inventory as `run`, and for each finding
+asks a Claude model to write a plain-language summary, name the triggering
+condition, and *draft* a `verify` probe that would confirm a fix holds. It
+writes the suggestions to a file for you to review — it changes nothing and runs
+nothing.
+
+```bash
+ANTHROPIC_API_KEY=... fnh enrich --source osv,ghsa --inventory inventory.json \
+  --allow-host staging.internal --out suggestions.json
+```
+
+Three things keep a drafted probe from becoming code that runs on its own:
+
+1. The model's reply is parsed as JSON data, never evaluated.
+2. A drafted probe must name one of the bounded probe templates above and
+   compile; the arbitrary-shell `command_fails` and raw-string `verify` are
+   refused, and anything that doesn't compile is dropped with a note.
+3. Each suggestion is written with `"approved": false`. To use one, you copy it
+   into your mitigation library, where it is vetted again by the safety policy
+   and only ever run against your own staging.
+
+`--allow-host` names your staging hosts; a drafted probe aimed anywhere else is
+kept but flagged so you re-point it. Enrichment needs network and
+`ANTHROPIC_API_KEY`; the client is pluggable, so the tests run offline.
 
 ## How it works
 
@@ -327,6 +362,7 @@ Tests use injected transports and runners, so they run without network access or
 | `planner.py` | Patch or mitigation selection |
 | `executor.py` | Runners and validators |
 | `probes.py` | Verify command builders |
+| `enrich.py` | LLM summaries and review-only drafted probes |
 | `promote.py` | Promotion requests |
 | `safety.py` | Safety policy |
 | `cvss.py` | CVSS v3 scoring |
