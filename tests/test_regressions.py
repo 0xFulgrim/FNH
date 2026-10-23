@@ -253,3 +253,52 @@ def test_non_debian_comparison_unchanged():
     from fnh.matcher import _cmp
     assert _cmp("2.31.0", "2.32.0", "pypi") == -1
     assert _cmp("10.0", "9.0", "npm") == 1
+
+
+# -- PEP 440 / SemVer pre-releases ------------------------------------------
+
+@pytest.mark.parametrize("a,b,expected", [
+    ("1.0rc1", "1.0", -1),
+    ("1.0.dev0", "1.0a1", -1),
+    ("1.0a1", "1.0b1", -1),
+    ("1.0", "1.0.post1", -1),
+    ("1.0.post1.dev0", "1.0.post1", -1),
+    ("1!1.0", "2.0", 1),
+    ("1.0", "1.0.0", 0),
+    ("1.0+local", "1.0", 1),
+    ("2.32.0rc1", "2.32.0", -1),
+])
+def test_pep440_ordering(a, b, expected):
+    from fnh.matcher import _cmp
+    assert _cmp(a, b, "pypi") == expected
+    assert _cmp(b, a, "pypi") == -expected
+
+
+@pytest.mark.parametrize("a,b,expected", [
+    ("1.0.0-alpha", "1.0.0-alpha.1", -1),
+    ("1.0.0-alpha.1", "1.0.0-alpha.beta", -1),
+    ("1.0.0-beta.2", "1.0.0-beta.11", -1),
+    ("1.0.0-rc.1", "1.0.0", -1),
+    ("1.0.0+build.1", "1.0.0", 0),
+    ("v1.2.3", "1.2.3", 0),
+    ("4.17.21", "4.17.20", 1),
+])
+def test_semver_ordering(a, b, expected):
+    from fnh.matcher import _cmp
+    assert _cmp(a, b, "npm") == expected
+    assert _cmp(b, a, "npm") == -expected
+
+
+def test_installed_prerelease_below_fix_is_vulnerable():
+    adv = Advisory("CVE-R", "t", "s", Severity.HIGH,
+                   affected=[{"ecosystem": "pypi", "name": "requests"}],
+                   vulnerable_ranges=["<2.32.0"], fixed_versions=["2.32.0"])
+    asset = Asset("r", "requests", "package", ecosystem="pypi", version="2.32.0rc1")
+    (match,) = Matcher().match([adv], [asset])
+    assert Planner().plan(match).target_version == "2.32.0"
+
+
+def test_unparseable_versions_fall_back_to_numeric():
+    from fnh.matcher import _cmp
+    assert _cmp("not a version 2", "1.0", "pypi") == -1
+    assert _cmp("1.2.x", "1.2.0", "npm") == 0

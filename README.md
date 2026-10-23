@@ -196,9 +196,10 @@ Defined in `fnh/safety.py`:
 
 ## Limitations
 
-- Debian and Ubuntu versions use dpkg ordering. Other ecosystems compare the
-  leading dotted numeric part only, so pre-releases like `1.0rc1` compare equal
-  to `1.0`.
+- Versions are compared with dpkg ordering for Debian and Ubuntu, PEP 440 for
+  PyPI and SemVer 2.0 for npm. Other ecosystems, and versions that don't parse,
+  fall back to the leading dotted numeric part, so their pre-releases compare
+  equal to the release.
 - Automated patching covers pip, npm and apt. Other ecosystems get a plan that
   needs a human.
 - CVSS v4 vectors are not scored. FNH falls back to the severity label in the

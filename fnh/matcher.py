@@ -1,9 +1,9 @@
 """Stage 2 (part b) — match advisories against the inventory.
 
-Decides which assets each advisory actually affects. Version comparison here
-is intentionally small and dependency-free: it handles dotted numeric
-versions and simple range expressions like ">=1.0,<1.4.2". For production
-use, swap `_in_range` for `packaging.version` / `semver` per ecosystem.
+Decides which assets each advisory actually affects, using range expressions
+like ">=1.0,<1.4.2". Versions are compared per ecosystem without third-party
+dependencies: dpkg ordering for Debian/Ubuntu, PEP 440 for PyPI, SemVer 2.0 for
+npm, and the leading dotted numeric part for everything else.
 """
 
 from __future__ import annotations
@@ -81,6 +81,91 @@ def _cmp_dpkg(a: str, b: str) -> int:
     return _verrevcmp(ua, ub) or _verrevcmp(ra, rb)
 
 
+# PEP 440 (PyPI). Mirrors the ordering in `packaging.version` without the
+# dependency: epoch, release (trailing zeros ignored), pre, post, dev, local.
+_PEP440_RE = re.compile(
+    r"""^\s*v?
+    (?:(?P<epoch>[0-9]+)!)?
+    (?P<release>[0-9]+(?:\.[0-9]+)*)
+    (?:[-_.]?(?P<pre_l>a|b|c|rc|alpha|beta|pre|preview)[-_.]?(?P<pre_n>[0-9]+)?)?
+    (?:-(?P<post_n1>[0-9]+)|[-_.]?(?P<post_l>post|rev|r)[-_.]?(?P<post_n2>[0-9]+)?)?
+    (?:[-_.]?(?P<dev_l>dev)[-_.]?(?P<dev_n>[0-9]+)?)?
+    (?:\+(?P<local>[a-z0-9]+(?:[-_.][a-z0-9]+)*))?
+    \s*$""",
+    re.VERBOSE | re.IGNORECASE,
+)
+_PRE_ORDER = {"a": 0, "alpha": 0, "b": 1, "beta": 1, "c": 2, "rc": 2, "pre": 2, "preview": 2}
+# Sentinels that sort below / above any real (0, ...) segment key.
+_LOW, _HIGH = (-1,), (1,)
+
+
+def _pep440_key(v: str) -> tuple | None:
+    m = _PEP440_RE.match(v)
+    if not m:
+        return None
+    release = [int(p) for p in m.group("release").split(".")]
+    while len(release) > 1 and release[-1] == 0:
+        release.pop()
+    pre_l, post, dev = m.group("pre_l"), None, None
+    if m.group("post_n1") is not None:
+        post = int(m.group("post_n1"))
+    elif m.group("post_l"):
+        post = int(m.group("post_n2") or 0)
+    if m.group("dev_l"):
+        dev = int(m.group("dev_n") or 0)
+
+    if pre_l:
+        pre = (0, _PRE_ORDER[pre_l.lower()], int(m.group("pre_n") or 0))
+    elif post is None and dev is not None:
+        pre = _LOW  # 1.0.dev0 sorts before 1.0a0
+    else:
+        pre = _HIGH  # a final release sorts after its pre-releases
+    local = m.group("local")
+    return (
+        int(m.group("epoch") or 0),
+        tuple(release),
+        pre,
+        _LOW if post is None else (0, post),
+        _HIGH if dev is None else (0, dev),
+        _LOW if local is None else (0, tuple(
+            (1, int(s), "") if s.isdigit() else (0, 0, s.lower())
+            for s in re.split(r"[-_.]", local)
+        )),
+    )
+
+
+# SemVer 2.0 (npm). Build metadata is ignored; a missing minor/patch is 0.
+_SEMVER_RE = re.compile(
+    r"^\s*[v=]?\s*(\d+)(?:\.(\d+))?(?:\.(\d+))?"
+    r"(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z.-]+)?\s*$"
+)
+
+
+def _cmp_semver(a: str, b: str) -> int | None:
+    ma, mb = _SEMVER_RE.match(a), _SEMVER_RE.match(b)
+    if not ma or not mb:
+        return None
+    core_a = tuple(int(x or 0) for x in ma.group(1, 2, 3))
+    core_b = tuple(int(x or 0) for x in mb.group(1, 2, 3))
+    if core_a != core_b:
+        return -1 if core_a < core_b else 1
+    pa, pb = ma.group(4), mb.group(4)
+    if pa == pb:
+        return 0
+    if pa is None or pb is None:
+        return 1 if pa is None else -1  # a release sorts after its pre-releases
+    for x, y in zip(pa.split("."), pb.split(".")):
+        if x == y:
+            continue
+        if x.isdigit() and y.isdigit():
+            return -1 if int(x) < int(y) else 1
+        if x.isdigit() != y.isdigit():
+            return -1 if x.isdigit() else 1  # numeric identifiers sort first
+        return -1 if x < y else 1
+    na, nb = len(pa.split(".")), len(pb.split("."))
+    return (na > nb) - (na < nb)
+
+
 def _uses_dpkg_versions(ecosystem: str | None) -> bool:
     """Generic "os" or an OSV Debian/Ubuntu ecosystem like "Debian:12"."""
     return bool(ecosystem) and (
@@ -89,8 +174,18 @@ def _uses_dpkg_versions(ecosystem: str | None) -> bool:
 
 
 def _cmp(a: str, b: str, ecosystem: str | None = None) -> int:
+    eco = (ecosystem or "").lower()
     if _uses_dpkg_versions(ecosystem):
         return _cmp_dpkg(a, b)
+    if eco == "pypi":
+        ka, kb = _pep440_key(a), _pep440_key(b)
+        if ka is not None and kb is not None:
+            return (ka > kb) - (ka < kb)
+    elif eco == "npm":
+        c = _cmp_semver(a, b)
+        if c is not None:
+            return c
+    # Unknown ecosystem or an unparseable version: numeric prefix only.
     return _cmp_numeric(a, b)
 
 
