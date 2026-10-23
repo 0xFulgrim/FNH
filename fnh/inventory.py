@@ -42,10 +42,13 @@ class FileInventory(Inventory):
                 id=a["id"],
                 name=a.get("name", a["id"]),
                 kind=a.get("kind", "package"),
-                ecosystem=a.get("ecosystem"),
+                # Assets known only by CPE (appliances, binaries) still need an
+                # ecosystem for matching; NVD advisories use "cpe" for them.
+                ecosystem=a.get("ecosystem") or ("cpe" if a.get("cpe") else None),
                 version=a.get("version"),
                 environment=a.get("environment", "production"),
                 tags=a.get("tags", {}),
+                cpe=a.get("cpe"),
             )
             for a in items
         ]

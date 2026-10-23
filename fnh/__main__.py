@@ -11,12 +11,18 @@ from __future__ import annotations
 
 import argparse
 import sys
+from urllib.error import URLError
 from pathlib import Path
 
 from .executor import DryRunner, Executor, ShellRunner, SSHRunner
-from .feed import FileFeed
+from .feed import Feed, FileFeed, MultiFeed
+from .ghsa import GHSAError, GHSAFeed
+from .ghsa import packages_from_inventory as ghsa_packages
 from .inventory import COLLECTORS, FileInventory, LiveInventory
-from .osv import OSVCache, OSVFeed, packages_from_inventory
+from .httpclient import HTTPStatusError
+from .nvd import NVDError, NVDFeed
+from .osv import OSVCache, OSVFeed
+from .osv import packages_from_inventory as osv_packages
 from .pipeline import Pipeline
 from .planner import MitigationLibrary, Planner
 from .promote import FilePromoter, PromotionRefused, apply_promotion
@@ -73,20 +79,46 @@ def _build_inventory(args: argparse.Namespace, runner):
     return FileInventory(args.inventory)
 
 
+# Most precise first: the matcher keeps the first advisory it sees for a given
+# CVE and asset. NVD ranges are upstream versions, so it goes last.
+SOURCES = ("file", "osv", "ghsa", "nvd")
+
+
+def _parse_sources(value: str) -> list[str]:
+    names = [s.strip().lower() for s in value.split(",") if s.strip()]
+    unknown = sorted(set(names) - set(SOURCES))
+    if unknown or not names:
+        raise argparse.ArgumentTypeError(
+            f"unknown source(s) {', '.join(unknown) or '(none)'}; choose from {', '.join(SOURCES)}"
+        )
+    return [s for s in SOURCES if s in names]
+
+
+def _build_feed(args: argparse.Namespace, inventory) -> Feed:
+    feeds: list[Feed] = []
+    for source in args.source:
+        if source == "file":
+            feeds.append(FileFeed(args.advisories))
+        elif source == "osv":
+            # Ask only about packages we actually run; the matcher then applies
+            # version ranges to the inventory.
+            cache = OSVCache(args.cache) if args.cache else None
+            feeds.append(OSVFeed(osv_packages(inventory.assets()), cache=cache,
+                                 batch=not args.no_batch))
+        elif source == "ghsa":
+            feeds.append(GHSAFeed(ghsa_packages(inventory.assets())))
+        elif source == "nvd":
+            feeds.append(NVDFeed(inventory.assets()))
+    return feeds[0] if len(feeds) == 1 else MultiFeed(feeds)
+
+
 def build_pipeline(args: argparse.Namespace) -> Pipeline:
     staging = _staging_runner(args)
     # Collecting inventory only reads package lists, so it uses the real host
     # even under --dry-run; only remediation is replaced by a DryRunner.
     inventory = _build_inventory(args, staging)
     runner = DryRunner() if args.dry_run else staging
-    if args.source == "osv":
-        # Watch exactly the packages we actually run. OSV returns their known
-        # advisories; our matcher then applies version ranges to the inventory.
-        packages = packages_from_inventory(inventory.assets())
-        cache = OSVCache(args.cache) if args.cache else None
-        feed = OSVFeed(packages, cache=cache, batch=not args.no_batch)
-    else:
-        feed = FileFeed(args.advisories)
+    feed = _build_feed(args, inventory)
     planner = Planner(MitigationLibrary(args.mitigations))
     executor = Executor(runner=runner, production_runner=_production_runner(args))
     policy = SafetyPolicy()
@@ -104,8 +136,10 @@ def build_pipeline(args: argparse.Namespace) -> Pipeline:
 
 def _add_run_parser(sub) -> None:
     run = sub.add_parser("run", help="run the remediation pipeline")
-    run.add_argument("--source", choices=["file", "osv"], default="file",
-                     help="advisory source: 'file' (offline example) or 'osv' (live osv.dev)")
+    run.add_argument("--source", type=_parse_sources, default=["file"],
+                     help="comma-separated advisory sources: file, osv, ghsa, nvd "
+                          "(default: file). GHSA reads GITHUB_TOKEN and NVD reads "
+                          "NVD_API_KEY from the environment if set.")
     run.add_argument("--advisories", default=str(EXAMPLES / "advisories.json"))
     run.add_argument("--mitigations", default=str(EXAMPLES / "mitigations.json"))
     run.add_argument("--cache", default=None, help="OSV record cache file (osv source only)")
@@ -222,7 +256,14 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     if args.command == "run":
-        print(summarize(build_pipeline(args).run()))
+        try:
+            outcomes = build_pipeline(args).run()
+        except (GHSAError, NVDError, HTTPStatusError, URLError) as exc:
+            # Feeds run before anything is changed, so nothing needs undoing.
+            reason = getattr(exc, "reason", None) or exc
+            print(f"fnh: advisory feed failed: {reason}", file=sys.stderr)
+            return 2
+        print(summarize(outcomes))
         return 0
     if args.command == "promote":
         return _cmd_promote(args)

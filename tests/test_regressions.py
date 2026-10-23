@@ -466,3 +466,52 @@ def test_repeat_runs_reuse_pending_promotion_request(tmp_path):
     second = pipeline.run()[0]
     assert len(promoter.requests()) == 1
     assert first.notes[-1] == second.notes[-1]
+
+
+# -- multiple advisory sources ---------------------------------------------------
+
+def test_same_cve_from_two_sources_is_remediated_once_using_first():
+    from fnh.feed import MultiFeed
+    from fnh.ghsa import parse_ghsa_advisory
+    osv_adv = parse_osv_record({"id": "PYSEC-1", "aliases": ["CVE-S"], "affected": [{
+        "package": {"ecosystem": "PyPI", "name": "requests"},
+        "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "2.32.0"}]}]}]})
+    ghsa_adv = parse_ghsa_advisory({"ghsa_id": "GHSA-s", "cve_id": "CVE-S", "severity": "high",
+        "vulnerabilities": [{"package": {"ecosystem": "pip", "name": "requests"},
+                             "vulnerable_version_range": "< 2.33.0",
+                             "first_patched_version": "2.33.0"}]})
+    feed = MultiFeed([_Feed([osv_adv]), _Feed([ghsa_adv])])
+    asset = Asset("r", "requests", "package", ecosystem="pypi", version="2.31.0")
+    (match,) = Matcher().match(feed.fetch(), [asset])
+    assert match.advisory.source == "osv"
+    assert Planner().plan(match).target_version == "2.32.0"
+
+
+def test_source_flag_orders_and_builds_feeds():
+    import argparse
+    from fnh.__main__ import _build_feed, _parse_sources
+    from fnh.feed import MultiFeed
+    from fnh.ghsa import GHSAFeed
+    from fnh.nvd import NVDFeed
+    from fnh.osv import OSVFeed
+
+    assert _parse_sources("nvd, OSV,ghsa") == ["osv", "ghsa", "nvd"]
+    with pytest.raises(argparse.ArgumentTypeError):
+        _parse_sources("osv,nope")
+    args = argparse.Namespace(source=["osv", "ghsa", "nvd"], cache=None, no_batch=False)
+    feed = _build_feed(args, _Inv([Asset("a", "x", "package", ecosystem="pypi", version="1")]))
+    assert isinstance(feed, MultiFeed)
+    assert [type(f) for f in feed.feeds] == [OSVFeed, GHSAFeed, NVDFeed]
+
+
+def test_feed_failure_exits_2_with_message(monkeypatch, capsys):
+    import fnh.__main__ as cli
+    from fnh.nvd import NVDError
+
+    class Boom:
+        def run(self):
+            raise NVDError("NVD request failed: HTTP 503")
+
+    monkeypatch.setattr(cli, "build_pipeline", lambda args: Boom())
+    assert cli.main(["run", "--dry-run"]) == 2
+    assert "advisory feed failed: NVD request failed" in capsys.readouterr().err

@@ -11,9 +11,10 @@ It is meant for infrastructure you own and operate.
 
 ## Features
 
-- Advisories from [OSV](https://osv.dev) (batch queries, on-disk cache) or a local JSON file
+- Advisories from [OSV](https://osv.dev), the [GitHub Advisory Database](https://github.com/advisories),
+  [NVD](https://nvd.nist.gov) or a local JSON file, alone or combined
 - Inventory from a JSON file, or collected live from a host with `pip`, `dpkg` and `npm`
-- Version-range matching and CVSS v3 base scoring
+- Version-range matching with dpkg, PEP 440 and SemVer ordering
 - Patch selection, with a fallback to a mitigation library
 - Remediation runs locally or on a remote staging host over SSH
 - Post-fix validation: version checks for patches, HTTP/TCP probes for mitigations
@@ -74,11 +75,27 @@ fnh run --source osv \
 
 # Queue production fixes that pass on staging
 fnh run --source osv --inventory inventory.json --promote-dir ./promotions
+
+# Combine sources
+GITHUB_TOKEN=... NVD_API_KEY=... fnh run --source osv,ghsa,nvd --inventory inventory.json
 ```
+
+### Advisory sources
+
+| Source | Matches on | Notes |
+|--------|------------|-------|
+| `file` | ecosystem + name | Local JSON, format below. The default. |
+| `osv` | ecosystem + name | Aggregates GHSA, PyPA, RustSec, Debian, Ubuntu and more. Batch queries; `--cache` keeps records between runs. Best choice for distro packages. |
+| `ghsa` | ecosystem + name | GitHub's reviewed advisories for pip, npm, Go, Maven, NuGet, RubyGems, Composer, Rust, Pub and Hex. Set `GITHUB_TOKEN` for 5,000 requests/hour instead of 60. |
+| `nvd` | CPE | Only for assets with a `cpe`. Paced to NVD's limits: 5 requests per 30 s, or 50 with `NVD_API_KEY`. |
+
+Sources run in the order `file, osv, ghsa, nvd`. When two report the same CVE
+for the same asset, the first one's ranges and fixed versions are used. A feed
+error stops the run with exit code 2 before anything is changed.
 
 | Flag | Description |
 |------|-------------|
-| `--source {file,osv}` | Advisory source (default `file`) |
+| `--source LIST` | Comma-separated sources: `file`, `osv`, `ghsa`, `nvd` (default `file`) |
 | `--advisories PATH` | Advisory file for `--source file` |
 | `--cache PATH` | OSV record cache file |
 | `--no-batch` | One OSV `/v1/query` per package instead of `/v1/querybatch` |
@@ -127,9 +144,15 @@ queuing duplicates.
 ```json
 [
   {"id": "api-requests", "name": "requests", "ecosystem": "pypi",
-   "version": "2.31.0", "environment": "staging"}
+   "version": "2.31.0", "environment": "staging"},
+  {"id": "edge-proxy", "name": "nginx", "version": "1.18.0",
+   "environment": "production", "cpe": "cpe:2.3:a:f5:nginx"}
 ]
 ```
+
+`cpe` is only used by the NVD source; `vendor:product` shorthand also works.
+An entry with a `cpe` and no `ecosystem` gets ecosystem `cpe`: it can be
+matched, but upgrading it is left to a human.
 
 Supported `ecosystem` values for OSV lookups: `pypi`, `npm`, `go`, `maven`,
 `nuget`, `cargo`, `rubygems`, `composer`, `pub`, `hex`, or any OSV ecosystem
@@ -209,11 +232,16 @@ Defined in `fnh/safety.py`:
   equal to the release.
 - Automated patching covers pip, npm and apt. Other ecosystems get a plan that
   needs a human.
-- CVSS v4 vectors are not scored. FNH falls back to the severity label in the
-  OSV record.
+- CVSS v4 vectors in OSV records are not scored; FNH uses the record's severity
+  label. GHSA and NVD supply numeric scores.
+- NVD ranges are upstream versions. Distro packages that backport fixes without
+  changing the upstream version show up as false positives; use OSV for them.
+- NVD configurations that need two products together (an app on a specific OS)
+  are matched on the vulnerable product alone.
 - Inventory entries with a generic `os` ecosystem are skipped for OSV lookups.
   Use a specific ecosystem like `Debian:12`.
-- Live OSV queries need outbound HTTPS to `api.osv.dev`.
+- Live sources need outbound HTTPS to `api.osv.dev`, `api.github.com` or
+  `services.nvd.nist.gov`.
 
 ## Development
 
@@ -227,7 +255,8 @@ Tests use injected transports and runners, so they run without network access or
 
 | Module | Purpose |
 |--------|---------|
-| `feed.py`, `osv.py` | Advisory sources |
+| `feed.py`, `osv.py`, `ghsa.py`, `nvd.py` | Advisory sources |
+| `httpclient.py` | Shared HTTPS client |
 | `inventory.py` | File and live inventory |
 | `matcher.py` | Version-range matching |
 | `planner.py` | Patch or mitigation selection |
