@@ -36,19 +36,28 @@ def test_http_status_options():
 
 @pytest.fixture
 def header_server():
-    """Local HTTP server that returns X-Leak only on /leaky."""
+    """Local HTTP server: /leaky leaks a header and body; /slow stalls."""
+    import time
+
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
+            if self.path == "/slow":
+                time.sleep(1.5)
+            body = b"secret-token" if self.path == "/leaky" else b"all clear"
             self.send_response(200)
             if self.path == "/leaky":
                 self.send_header("X-Leak", "secret")
-            self.send_header("Content-Length", "0")
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
+            try:
+                self.wfile.write(body)
+            except BrokenPipeError:
+                pass  # a client that timed out (response_under test) hung up
 
         def log_message(self, *args):
             pass
 
-    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     yield f"http://127.0.0.1:{server.server_address[1]}"
@@ -112,5 +121,40 @@ def test_invalid_spec_raises():
 
 def test_registry_lists_probes():
     assert set(available_probes()) == {
-        "http_status", "http_header_absent", "port_closed", "command_fails"
+        "http_status", "http_header_absent", "http_header_present",
+        "http_body_lacks", "response_under", "port_closed", "command_fails",
     }
+
+
+@needs_curl
+def test_http_header_present_passes_when_header_set(header_server):
+    cmd = build_verify({"probe": "http_header_present", "url": header_server + "/leaky", "header": "x-leak"})
+    assert _run(cmd) == 0
+
+
+@needs_curl
+def test_http_header_present_fails_when_missing_or_down(header_server):
+    assert _run(build_verify({"probe": "http_header_present", "url": header_server + "/clean", "header": "X-Leak"})) != 0
+    assert _run(build_verify({"probe": "http_header_present", "url": "http://127.0.0.1:1/", "header": "X-Leak"})) != 0
+
+
+@needs_curl
+def test_http_body_lacks(header_server):
+    # Marker gone -> pass; marker present -> fail; service down -> fail.
+    assert _run(build_verify({"probe": "http_body_lacks", "url": header_server + "/clean", "marker": "secret-token"})) == 0
+    assert _run(build_verify({"probe": "http_body_lacks", "url": header_server + "/leaky", "marker": "secret-token"})) != 0
+    assert _run(build_verify({"probe": "http_body_lacks", "url": "http://127.0.0.1:1/", "marker": "x"})) != 0
+
+
+@needs_curl
+def test_response_under(header_server):
+    assert _run(build_verify({"probe": "response_under", "url": header_server + "/clean", "timeout": 5})) == 0
+    # /slow sleeps 1.5s; a 1s budget must fail.
+    assert _run(build_verify({"probe": "response_under", "url": header_server + "/slow", "timeout": 1})) != 0
+
+
+def test_http_body_lacks_marker_is_literal_not_regex():
+    # A marker with regex metacharacters and a leading dash must stay literal
+    # and not be read as a grep option.
+    cmd = build_verify({"probe": "http_body_lacks", "url": "https://stg/", "marker": "-v.*[x]"})
+    assert "grep -qF -- " in cmd and _run(cmd + "; true") == 0  # compiles & runs

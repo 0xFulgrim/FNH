@@ -13,6 +13,12 @@ instead of hand-writing shell. A raw string `verify` is still honored as-is.
 The builders lean on widely available tools (curl, bash). They assert the
 *hardened* behavior you expect after mitigation — e.g. a now-rejected request
 returns 400, a disabled endpoint returns 404, a port no longer listens.
+
+Every probe but `command_fails` is a bounded template: the spec only fills in
+parameters (url, header, marker, ...), never shell. `command_fails` and a raw
+string `verify` are the two escape hatches that run arbitrary shell, so the LLM
+enricher (enrich.py) is not allowed to emit either — it may only draft the
+parametrized probes, which a human reviews before they are used.
 """
 
 from __future__ import annotations
@@ -92,6 +98,60 @@ def port_closed(spec: dict) -> str:
     )
 
 
+def _curl(spec: dict, *extra: str) -> list[str]:
+    """Shared curl invocation for the HTTP probes."""
+    curl = ["curl", "-sS", "--max-time", _q(spec.get("timeout", 10)), *extra]
+    if spec.get("insecure"):
+        curl.append("-k")
+    if spec.get("method"):
+        curl += ["-X", _q(spec["method"])]
+    if spec.get("header"):
+        curl += ["-H", _q(spec["header"])]
+    if spec.get("data") is not None:
+        curl += ["--data-binary", _q(spec["data"])]
+    curl.append(_q(spec["url"]))
+    return curl
+
+
+def http_header_present(spec: dict) -> str:
+    """Assert a response now carries a given header (e.g. a security header the
+    fix adds, like Content-Security-Policy).
+
+    spec: url, header (name, case-insensitive), insecure (bool).
+    """
+    curl = _curl(spec, "-D", "-", "-o", "/dev/null")
+    # Capture first so a failed request fails the probe rather than reading as
+    # "header missing"; match a header line by name.
+    return (
+        "h=$(" + " ".join(curl) + ") && printf '%s\\n' \"$h\" | grep -qi "
+        + _q("^" + spec["header"] + ":")
+    )
+
+
+def http_body_lacks(spec: dict) -> str:
+    """Assert a response body no longer contains a marker (a leaked secret, a
+    stack trace, a version banner the fix removes).
+
+    spec: url, marker (literal text), insecure (bool).
+    """
+    curl = _curl(spec, "-o", "-")
+    # Fixed-string, literal match; `--` guards a marker starting with "-".
+    # Capture first so a failed request fails the probe, then invert the grep.
+    return (
+        "b=$(" + " ".join(curl) + ") && ! printf '%s' \"$b\" | grep -qF -- "
+        + _q(spec["marker"])
+    )
+
+
+def response_under(spec: dict) -> str:
+    """Assert a request completes within a time budget (the fix stops it
+    hanging or crashing). curl's own --max-time is the budget.
+
+    spec: url, timeout (seconds, default 10), insecure (bool).
+    """
+    return " ".join(_curl(spec, "-o", "/dev/null"))
+
+
 def command_fails(spec: dict) -> str:
     """Assert an arbitrary command now fails (the exploit path is blocked).
 
@@ -103,6 +163,9 @@ def command_fails(spec: dict) -> str:
 _REGISTRY: dict[str, ProbeBuilder] = {
     "http_status": http_status,
     "http_header_absent": http_header_absent,
+    "http_header_present": http_header_present,
+    "http_body_lacks": http_body_lacks,
+    "response_under": response_under,
     "port_closed": port_closed,
     "command_fails": command_fails,
 }

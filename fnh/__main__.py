@@ -1,6 +1,7 @@
 """CLI entry point.
 
     fnh run      — feed -> inventory -> match -> plan -> apply/validate -> queue
+    fnh enrich   — draft summaries and review-only verify probes with an LLM
     fnh promote  — list and (with approval) apply queued production promotions
     fnh dashboard — browse run reports in a local, read-only web dashboard
 
@@ -11,6 +12,7 @@ offline. Swap in real Feed/Inventory/Runner implementations for a live deploy.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -136,26 +138,17 @@ def build_pipeline(args: argparse.Namespace) -> Pipeline:
     )
 
 
-def _add_run_parser(sub) -> None:
-    run = sub.add_parser("run", help="run the remediation pipeline")
-    run.add_argument("--source", type=_parse_sources, default=["file"],
-                     help="comma-separated advisory sources: file, osv, ghsa, nvd "
-                          "(default: file). GHSA reads GITHUB_TOKEN and NVD reads "
-                          "NVD_API_KEY from the environment if set.")
-    run.add_argument("--advisories", default=str(EXAMPLES / "advisories.json"))
-    run.add_argument("--mitigations", default=str(EXAMPLES / "mitigations.json"))
-    run.add_argument("--cache", default=None, help="OSV record cache file (osv source only)")
-    run.add_argument("--no-batch", action="store_true",
-                     help="use one /v1/query per package instead of the batch endpoint")
-    run.add_argument("--dry-run", action="store_true", help="never execute commands")
-    run.add_argument("--allow-production", action="store_true",
-                     help="change production assets directly on --prod-host")
-    run.add_argument("--promote-dir", default=None,
-                     help="queue validated production fixes here for approval")
-    run.add_argument("--report-dir", default=None,
-                     help="also write a JSON report of this run here (read by `fnh dashboard`)")
-
-    inv = run.add_argument_group("inventory")
+def _add_discovery_args(p) -> None:
+    """Advisory source + inventory args, shared by `run` and `enrich`."""
+    p.add_argument("--source", type=_parse_sources, default=["file"],
+                   help="comma-separated advisory sources: file, osv, ghsa, nvd "
+                        "(default: file). GHSA reads GITHUB_TOKEN and NVD reads "
+                        "NVD_API_KEY from the environment if set.")
+    p.add_argument("--advisories", default=str(EXAMPLES / "advisories.json"))
+    p.add_argument("--cache", default=None, help="OSV record cache file (osv source only)")
+    p.add_argument("--no-batch", action="store_true",
+                   help="use one /v1/query per package instead of the batch endpoint")
+    inv = p.add_argument_group("inventory")
     inv.add_argument("--inventory-source", choices=["file", "live"], default="file")
     inv.add_argument("--inventory", default=str(EXAMPLES / "inventory.json"),
                      help="inventory file (file source)")
@@ -167,6 +160,19 @@ def _add_run_parser(sub) -> None:
     inv.add_argument("--dpkg-ecosystem", default=None,
                      help="OSV ecosystem for dpkg assets, e.g. 'Debian:12' "
                           "(default: detected from the host's /etc/os-release)")
+
+
+def _add_run_parser(sub) -> None:
+    run = sub.add_parser("run", help="run the remediation pipeline")
+    _add_discovery_args(run)
+    run.add_argument("--mitigations", default=str(EXAMPLES / "mitigations.json"))
+    run.add_argument("--dry-run", action="store_true", help="never execute commands")
+    run.add_argument("--allow-production", action="store_true",
+                     help="change production assets directly on --prod-host")
+    run.add_argument("--promote-dir", default=None,
+                     help="queue validated production fixes here for approval")
+    run.add_argument("--report-dir", default=None,
+                     help="also write a JSON report of this run here (read by `fnh dashboard`)")
 
     staging = run.add_argument_group("remote staging (ssh)")
     staging.add_argument("--staging-host", default=None, help="run steps on this host over ssh")
@@ -211,6 +217,56 @@ def _add_dashboard_parser(sub) -> None:
     d.add_argument("--open", action="store_true", help="open the dashboard in a browser")
     d.add_argument("--allow-host", action="append", default=[], metavar="NAME",
                    help="extra host name the dashboard may be reached by (repeatable)")
+
+
+def _add_enrich_parser(sub) -> None:
+    e = sub.add_parser(
+        "enrich",
+        help="draft plain-language summaries and review-only verify probes with an LLM",
+    )
+    _add_discovery_args(e)
+    e.add_argument("--out", default=None,
+                   help="write the suggestions here as JSON (default: stdout)")
+    e.add_argument("--model", default=None, help="LLM model id (default: a Claude Sonnet)")
+    e.add_argument("--limit", type=int, default=50,
+                   help="most findings to enrich in one run (default 50)")
+    e.add_argument("--allow-host", action="append", default=[], metavar="NAME",
+                   help="a staging host a drafted probe may target without a warning (repeatable)")
+
+
+def _cmd_enrich(args: argparse.Namespace) -> int:
+    from .enrich import AnthropicClient, enrich
+    from .matcher import Matcher
+
+    inventory = _build_inventory(args, ShellRunner())
+    feed = _build_feed(args, inventory)
+    try:
+        matches = Matcher().match(feed.fetch(), inventory.assets())
+    except FeedError as exc:
+        print(f"fnh: advisory feed failed: {exc}", file=sys.stderr)
+        return 2
+    if not matches:
+        print("no findings to enrich", file=sys.stderr)
+        return 0
+
+    client = AnthropicClient(model=args.model) if args.model else AnthropicClient()
+    allowed = set(args.allow_host) or None
+    suggestions = []
+    for match in matches[: args.limit]:
+        suggestions.append(
+            enrich(match.advisory, match.asset, client,
+                   allowed_hosts=allowed, model=args.model).to_dict()
+        )
+    payload = json.dumps(suggestions, indent=2)
+    if args.out:
+        Path(args.out).write_text(payload)
+        drafted = sum(1 for s in suggestions if s["suggested_probe"])
+        print(f"wrote {len(suggestions)} suggestion(s) ({drafted} with a drafted probe) "
+              f"to {args.out}; review before adding any probe to your mitigation library",
+              file=sys.stderr)
+    else:
+        print(payload)
+    return 0
 
 
 def _cmd_promote(args: argparse.Namespace) -> int:
@@ -276,6 +332,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     sub = parser.add_subparsers(dest="command", required=True)
     _add_run_parser(sub)
+    _add_enrich_parser(sub)
     _add_promote_parser(sub)
     _add_dashboard_parser(sub)
 
@@ -299,6 +356,8 @@ def main(argv: list[str] | None = None) -> int:
                   f"{args.host}:{args.port} can read your findings", file=sys.stderr)
         serve(args.report_dir, args.promote_dir, args.host, args.port, args.open, args.allow_host)
         return 0
+    if args.command == "enrich":
+        return _cmd_enrich(args)
     if args.command == "promote":
         return _cmd_promote(args)
     return 1
