@@ -24,7 +24,7 @@ def _best_fixed_version(match: Match) -> Optional[str]:
     current = match.asset.version
     eco = match.asset.ecosystem
     candidates = [
-        v for v in match.advisory.fixed_versions
+        v for v in match.fixed_versions
         if current is None or _cmp(v, current, eco) > 0
     ]
     if not candidates:
@@ -35,14 +35,20 @@ def _best_fixed_version(match: Match) -> Optional[str]:
 class MitigationLibrary:
     """Maps advisory id (or package name) to a known mitigation recipe.
 
-    Backed by a JSON file for dev/test. Each entry supplies steps, a rollback,
-    a confidence score, and an optional `verify` hint for the validator.
+    Backed by a JSON file. Each entry supplies steps, a rollback, a confidence
+    score and an optional `verify` probe. Probe specs are resolved on load, so
+    a bad entry fails before anything runs rather than halfway through a run.
     """
 
     def __init__(self, path: Optional[str | Path] = None):
-        self._data: dict = {}
+        self._data: dict[str, dict] = {}
         if path and Path(path).exists():
-            self._data = json.loads(Path(path).read_text())
+            for key, entry in json.loads(Path(path).read_text()).items():
+                try:
+                    verify = build_verify(entry.get("verify"))
+                except ValueError as exc:
+                    raise ValueError(f"mitigation {key!r}: {exc}") from None
+                self._data[key] = {**entry, "verify": verify}
 
     def lookup(self, match: Match) -> Optional[Remediation]:
         entry = self._data.get(match.advisory.id) or self._data.get(match.asset.name)
@@ -51,10 +57,10 @@ class MitigationLibrary:
         return Remediation(
             kind=RemediationKind.MITIGATION,
             description=entry.get("description", "mitigation from library"),
-            steps=entry.get("steps", []),
-            rollback=entry.get("rollback", []),
+            steps=list(entry.get("steps", [])),
+            rollback=list(entry.get("rollback", [])),
             confidence=float(entry.get("confidence", 0.5)),
-            verify=build_verify(entry.get("verify")),
+            verify=entry["verify"],
         )
 
 

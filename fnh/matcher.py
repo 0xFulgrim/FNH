@@ -215,29 +215,43 @@ def _in_range(version: str, range_expr: str, ecosystem: str | None = None) -> bo
     )
 
 
-def _affects(advisory: Advisory, asset: Asset) -> tuple[bool, str]:
-    if asset.ecosystem is None or asset.version is None:
-        return False, ""
-    for aff in advisory.affected:
-        if aff.get("ecosystem") != asset.ecosystem:
-            continue
-        if aff.get("name") != asset.name and aff.get("name") != asset.id:
-            continue
-        # Matched the package; now check version ranges (empty == all versions).
-        if not advisory.vulnerable_ranges:
-            return True, f"{asset.name} is {asset.ecosystem}, all versions affected"
-        for rng in advisory.vulnerable_ranges:
-            if _in_range(asset.version, rng, asset.ecosystem):
-                return True, f"{asset.name} {asset.version} satisfies vulnerable range '{rng}'"
-    return False, ""
+def _match_reason(advisory: Advisory, aff: dict, asset: Asset) -> str | None:
+    """Why `asset` is affected under one `advisory.affected` entry, or None."""
+    # Per-package ranges win; an empty list means every version is affected.
+    ranges = aff["ranges"] if "ranges" in aff else advisory.vulnerable_ranges
+    if not ranges:
+        return f"{asset.name} is {asset.ecosystem}, all versions affected"
+    for rng in ranges:
+        if _in_range(asset.version, rng, asset.ecosystem):
+            return f"{asset.name} {asset.version} satisfies vulnerable range '{rng}'"
+    return None
 
 
 class Matcher:
     def match(self, advisories: list[Advisory], assets: list[Asset]) -> list[Match]:
+        # Index assets by package so each affected entry is a dict lookup
+        # instead of a scan over the whole inventory. An entry's name may also
+        # refer to an asset id.
+        index: dict[tuple, list[Asset]] = {}
+        for asset in assets:
+            if asset.ecosystem is None or asset.version is None:
+                continue
+            index.setdefault((asset.ecosystem, asset.name), []).append(asset)
+            if asset.id != asset.name:
+                index.setdefault((asset.ecosystem, asset.id), []).append(asset)
+
         matches: list[Match] = []
+        # Feeds can return the same CVE from several databases (e.g. GHSA and
+        # PYSEC); remediate each advisory/asset pair once.
+        seen: set[tuple[str, str]] = set()
         for advisory in advisories:
-            for asset in assets:
-                affected, reason = _affects(advisory, asset)
-                if affected:
-                    matches.append(Match(advisory=advisory, asset=asset, reason=reason))
+            for aff in advisory.affected:
+                for asset in index.get((aff.get("ecosystem"), aff.get("name")), ()):
+                    key = (advisory.id, asset.id)
+                    if key in seen:
+                        continue
+                    reason = _match_reason(advisory, aff, asset)
+                    if reason is not None:
+                        seen.add(key)
+                        matches.append(Match(advisory, asset, reason, affected=aff))
         return matches

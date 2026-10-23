@@ -54,14 +54,15 @@ def test_ecosystem_mapping():
 
 
 def test_parse_osv_record():
-    adv = parse_osv_record(SAMPLE, queried_name="requests")
+    adv = parse_osv_record(SAMPLE)
     assert adv.id == "CVE-2026-0001"  # CVE alias preferred over GHSA id
     assert adv.source == "osv"
     assert adv.severity.value == "high"
     assert adv.cvss == 9.8
     assert adv.vulnerable_ranges == ["<2.32.0"]
     assert adv.fixed_versions == ["2.32.0"]
-    assert adv.affected == [{"ecosystem": "pypi", "name": "requests"}]
+    assert adv.affected == [{"ecosystem": "pypi", "name": "requests",
+                             "ranges": ["<2.32.0"], "fixed": ["2.32.0"]}]
 
 
 def _batch_transports(record=SAMPLE, modified="2026-10-01T00:00:00Z"):
@@ -145,7 +146,7 @@ def test_range_with_introduced_and_last_affected():
             }
         ],
     }
-    adv = parse_osv_record(rec, queried_name="pkg")
+    adv = parse_osv_record(rec)
     assert adv.vulnerable_ranges == [">=1.24.0,<=1.27.2"]
 
 

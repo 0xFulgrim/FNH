@@ -11,7 +11,7 @@ license = { file = "LICENSE" }
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest>=7"]
+dev = ["pytest>=7", "pyflakes>=3"]
 
 [project.scripts]
 fnh = "fnh.__main__:main"

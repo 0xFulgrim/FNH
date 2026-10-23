@@ -1,7 +1,5 @@
 import subprocess
 
-import pytest
-
 from fnh.executor import CommandResult, SSHRunner
 
 

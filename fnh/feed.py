@@ -1,9 +1,8 @@
 """Stage 1 — the news feed.
 
 Pulls vulnerability advisories from a source. The base class defines the
-contract; `FileFeed` reads a local JSON file so the pipeline runs fully
-offline for development and tests. A real deployment would add e.g. an
-`OSVFeed` / `NVDFeed` that fetches over HTTPS on the same interface.
+contract; `FileFeed` reads a local JSON file, and `osv.OSVFeed` queries
+osv.dev on the same interface.
 """
 
 from __future__ import annotations

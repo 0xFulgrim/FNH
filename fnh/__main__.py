@@ -13,15 +13,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from .executor import (
-    ChainValidator,
-    DryRunner,
-    Executor,
-    MitigationValidator,
-    ShellRunner,
-    SSHRunner,
-    VersionValidator,
-)
+from .executor import DryRunner, Executor, ShellRunner, SSHRunner
 from .feed import FileFeed
 from .inventory import COLLECTORS, FileInventory, LiveInventory
 from .osv import OSVCache, OSVFeed, packages_from_inventory
@@ -96,10 +88,7 @@ def build_pipeline(args: argparse.Namespace) -> Pipeline:
     else:
         feed = FileFeed(args.advisories)
     planner = Planner(MitigationLibrary(args.mitigations))
-    validator = ChainValidator([VersionValidator(), MitigationValidator()])
-    executor = Executor(
-        runner=runner, validator=validator, production_runner=_production_runner(args)
-    )
+    executor = Executor(runner=runner, production_runner=_production_runner(args))
     policy = SafetyPolicy()
     if args.allow_production:
         # Production assets are changed directly on --prod-host, subject to the
@@ -177,11 +166,11 @@ def _cmd_promote(args: argparse.Namespace) -> int:
     requests = promoter.requests()
 
     if not args.apply:
-        pending = [r for r in requests if not r.approved]
-        print(f"{len(requests)} promotion request(s), {len(pending)} pending approval:")
+        pending = [r for r in requests if r.result is None]
+        print(f"{len(requests)} promotion request(s), {len(pending)} pending:")
         for r in requests:
-            flag = "approved" if r.approved else "PENDING"
-            print(f"  [{flag}] {r.id}  {r.advisory_id} -> {r.asset_id}  ({r.description})")
+            status = (r.result or "pending").upper()
+            print(f"  [{status}] {r.id}  {r.advisory_id} -> {r.asset_id}  ({r.description})")
         return 0
 
     try:
@@ -189,6 +178,10 @@ def _cmd_promote(args: argparse.Namespace) -> int:
     except (FileNotFoundError, ValueError):
         print(f"no such promotion request: {args.apply}", file=sys.stderr)
         return 2
+
+    if request.result == "applied":
+        print(f"promotion {request.id} has already been applied", file=sys.stderr)
+        return 1
 
     if not args.approve:
         print(f"Refusing to apply {request.id} to production without --approve.")
@@ -210,9 +203,11 @@ def _cmd_promote(args: argparse.Namespace) -> int:
     except PromotionRefused as exc:
         print(str(exc), file=sys.stderr)
         return 1
+    finally:
+        # Persist the approval and result even if the run raised part-way.
+        promoter.save(request)
     for note in notes:
         print(note)
-    promoter.save(request)
     print(f"promotion {request.id}: {'APPLIED' if ok else 'FAILED'}")
     return 0 if ok else 1
 

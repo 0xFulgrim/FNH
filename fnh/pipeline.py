@@ -1,8 +1,9 @@
 """The orchestrator: feed -> inventory -> match -> plan -> act -> recommend.
 
-This is the top-level flow described as:
-    news feed > agent checks infra > deploys patches
-    (no patch) > mitigation > test on staging > verify > recommend next steps
+Each match gets a plan (patch, else mitigation). Plans that pass the safety
+policy are applied and validated; production fixes are validated on staging
+and queued for approval when a promoter is set; everything else is reported
+with next steps.
 """
 
 from __future__ import annotations

@@ -52,13 +52,21 @@ class SafetyPolicy:
                 f"threshold {self.min_confidence:.2f}"
             )
 
-        order = [Severity.LOW, Severity.MEDIUM, Severity.HIGH, Severity.CRITICAL]
-        if order.index(match.advisory.severity) < order.index(self.min_auto_severity):
+        if _SEVERITY_ORDER.index(match.advisory.severity) < _SEVERITY_ORDER.index(
+            self.min_auto_severity
+        ):
             return False, f"severity {match.advisory.severity.value} below auto threshold"
 
-        for step in remediation.steps:
+        # Rollback and verify commands run automatically too.
+        commands = [*remediation.steps, *remediation.rollback]
+        if remediation.verify:
+            commands.append(remediation.verify)
+        for command in commands:
             for token in self.forbidden_tokens:
-                if token in step:
-                    return False, f"remediation step contains forbidden token: {token!r}"
+                if token in command:
+                    return False, f"remediation command contains forbidden token: {token!r}"
 
         return True, "ok"
+
+
+_SEVERITY_ORDER = [Severity.LOW, Severity.MEDIUM, Severity.HIGH, Severity.CRITICAL]
