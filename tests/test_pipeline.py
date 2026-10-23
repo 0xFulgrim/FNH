@@ -1,15 +1,9 @@
 from pathlib import Path
 
-from fnh.executor import (
-    ChainValidator,
-    DryRunner,
-    Executor,
-    MitigationValidator,
-    VersionValidator,
-)
+from fnh.executor import DryRunner, Executor
 from fnh.feed import FileFeed
 from fnh.inventory import FileInventory
-from fnh.matcher import Matcher, _cmp, _in_range
+from fnh.matcher import _cmp, _in_range
 from fnh.models import OutcomeStatus
 from fnh.pipeline import Pipeline
 from fnh.planner import MitigationLibrary, Planner
@@ -38,9 +32,7 @@ def _pipeline(**overrides):
         feed=FileFeed(EX / "advisories.json"),
         inventory=FileInventory(EX / "inventory.json"),
         planner=Planner(MitigationLibrary(EX / "mitigations.json")),
-        executor=Executor(
-            DryRunner(), ChainValidator([VersionValidator(), MitigationValidator()])
-        ),
+        executor=Executor(DryRunner()),
         policy=policy,
     )
 

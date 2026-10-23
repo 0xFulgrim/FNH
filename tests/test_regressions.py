@@ -7,11 +7,10 @@ import pytest
 
 from fnh.__main__ import main
 from fnh.executor import (
-    ChainValidator,
     CommandResult,
+    DefaultValidator,
     DryRunner,
     Executor,
-    MitigationValidator,
     VersionValidator,
 )
 from fnh.feed import Feed
@@ -42,7 +41,7 @@ class _Inv(Inventory):
 
 
 def _validator():
-    return ChainValidator([VersionValidator(), MitigationValidator()])
+    return DefaultValidator()
 
 
 def _match(eco="pypi", name="requests", version="2.31.0", fixed=("2.32.0",), env="staging"):
@@ -82,7 +81,7 @@ def test_osv_git_ranges_are_not_compared_as_versions():
         "ranges": [{"type": "GIT", "events": [{"introduced": "0"}, {"fixed": "5f3a9c1"}]}],
         "versions": ["1.0.0", "1.0.1"],
     }]}
-    adv = parse_osv_record(rec, "pkg")
+    adv = parse_osv_record(rec)
     assert adv.fixed_versions == []
     assert adv.vulnerable_ranges == ["==1.0.0", "==1.0.1"]
     asset = Asset("x", "pkg", "package", ecosystem="pypi", version="2.0")
@@ -96,7 +95,7 @@ def test_osv_explicit_version_outside_ranges_is_kept():
                     "events": [{"introduced": "1.5"}, {"fixed": "1.20"}]}],
         "versions": ["1.2"],
     }]}
-    adv = parse_osv_record(rec, "pkg")
+    adv = parse_osv_record(rec)
     assert "==1.2" in adv.vulnerable_ranges
 
 
@@ -302,3 +301,168 @@ def test_unparseable_versions_fall_back_to_numeric():
     from fnh.matcher import _cmp
     assert _cmp("not a version 2", "1.0", "pypi") == -1
     assert _cmp("1.2.x", "1.2.0", "npm") == 0
+
+
+# -- multi-package and duplicate OSV records ----------------------------------
+
+def _osv_record(osv_id, cve, packages, modified="m"):
+    return {"id": osv_id, "aliases": [cve], "modified": modified, "affected": [
+        {"package": {"ecosystem": eco, "name": name},
+         "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": fix}]}]}
+        for eco, name, fix in packages
+    ]}
+
+
+def _osv_feed(records, packages):
+    from fnh.osv import OSVFeed
+    by_id = {r["id"]: r for r in records}
+
+    def post(url, payload):
+        results = []
+        for q in payload["queries"]:
+            pkg = q["package"]
+            results.append({"vulns": [
+                {"id": r["id"], "modified": r["modified"]} for r in records
+                if any(a["package"] == pkg for a in r["affected"])
+            ]})
+        return {"results": results}
+
+    return OSVFeed(packages, transport=post, get_transport=lambda url: by_id[url.rsplit("/", 1)[1]])
+
+
+def test_osv_advisory_covering_two_packages_matches_both():
+    rec = _osv_record("GHSA-1", "CVE-M", [("PyPI", "urllib3", "2.0.0"), ("PyPI", "requests", "2.32.0")])
+    advisories = _osv_feed([rec], [("PyPI", "urllib3"), ("PyPI", "requests")]).fetch()
+    assets = [Asset("u", "urllib3", "package", ecosystem="pypi", version="1.26.0"),
+              Asset("r", "requests", "package", ecosystem="pypi", version="2.31.0")]
+    matches = Matcher().match(advisories, assets)
+    targets = {m.asset.name: Planner().plan(m).target_version for m in matches}
+    assert targets == {"urllib3": "2.0.0", "requests": "2.32.0"}
+
+
+def test_same_cve_from_two_databases_matches_both_packages():
+    pypi = _osv_record("PYSEC-1", "CVE-D", [("PyPI", "lib", "2.0")])
+    deb = _osv_record("DSA-1", "CVE-D", [("Debian:12", "python3-lib", "2.0-1")])
+    advisories = _osv_feed([pypi, deb], [("PyPI", "lib"), ("Debian:12", "python3-lib")]).fetch()
+    assets = [Asset("a", "lib", "package", ecosystem="pypi", version="1.0"),
+              Asset("b", "python3-lib", "package", ecosystem="Debian:12", version="1.0-1")]
+    assert {m.asset.id for m in Matcher().match(advisories, assets)} == {"a", "b"}
+
+
+def test_duplicate_records_for_one_package_match_once():
+    ghsa = _osv_record("GHSA-2", "CVE-X", [("PyPI", "lib", "2.0")])
+    pysec = _osv_record("PYSEC-2", "CVE-X", [("PyPI", "lib", "2.0")])
+    advisories = _osv_feed([ghsa, pysec], [("PyPI", "lib")]).fetch()
+    asset = Asset("a", "lib", "package", ecosystem="pypi", version="1.0")
+    assert len(Matcher().match(advisories, [asset])) == 1
+
+
+def test_querybatch_is_split_at_osv_limit():
+    from fnh.osv import OSVFeed
+    sizes = []
+
+    def post(url, payload):
+        sizes.append(len(payload["queries"]))
+        return {"results": [{} for _ in payload["queries"]]}
+
+    OSVFeed([("PyPI", f"p{i}") for i in range(2500)], transport=post).fetch()
+    assert sizes == [1000, 1000, 500]
+
+
+# -- safety and recommendations -------------------------------------------------
+
+@pytest.mark.parametrize("field", ["rollback", "verify"])
+def test_forbidden_tokens_checked_in_rollback_and_verify(field):
+    m = _match()
+    rem = Remediation(RemediationKind.MITIGATION, "x", steps=["true"], confidence=1.0)
+    setattr(rem, field, ["rm -rf /"] if field == "rollback" else "rm -rf /")
+    allowed, reason = SafetyPolicy().check_plan(m, rem)
+    assert not allowed and "forbidden" in reason
+
+
+def test_held_patch_does_not_claim_failed_validation():
+    from fnh.recommend import recommendations_for
+    m = _match()
+    rem = Planner().plan(m)
+    recs = recommendations_for(m, rem, False, "severity low below auto threshold")
+    assert not any("did not validate" in r for r in recs)
+
+
+def test_direct_production_patch_is_not_told_to_promote():
+    prod = DryRunner()
+    pipeline, _ = _prod_pipeline(production_runner=prod)
+    out = pipeline.run()[0]
+    assert out.status.value == "patched"
+    assert not any("promote" in r.lower() for r in out.recommendations)
+
+
+def test_bad_probe_spec_fails_when_library_loads(tmp_path):
+    lib = tmp_path / "m.json"
+    lib.write_text(json.dumps({"CVE-B": {"steps": ["x"], "verify": {"probe": "nope"}}}))
+    with pytest.raises(ValueError, match="CVE-B"):
+        MitigationLibrary(lib)
+
+
+# -- runners and inventory -------------------------------------------------------
+
+def test_shell_runner_timeout_is_a_failed_result():
+    from fnh.executor import ShellRunner
+    result = ShellRunner(timeout=1).run("sleep 5")
+    assert result.returncode == 124 and not result.ok
+
+
+def test_live_inventory_collects_once():
+    from fnh.inventory import LiveInventory, PipCollector
+    runner = _Runner(json.dumps([{"name": "requests", "version": "2.31.0"}]))
+    inv = LiveInventory(runner, [PipCollector()])
+    assert inv.assets() == inv.assets()
+    assert len(runner.ran) == 1
+
+
+# -- promotion -----------------------------------------------------------------
+
+def _patch_request(**kw):
+    from fnh.promote import PromotionRequest
+    return PromotionRequest(
+        "CVE-1", "a", "production", "Upgrade requests to 2.32.0",
+        steps=["python3 -m pip install requests==2.32.0"],
+        rollback=["python3 -m pip install requests==2.31.0"],
+        ecosystem="pypi", package="requests", target_version="2.32.0",
+        approved=True, **kw,
+    )
+
+
+def test_promoted_patch_is_verified_by_installed_version():
+    from fnh.promote import apply_promotion
+    req = _patch_request()
+    ok, _ = apply_promotion(req, _Runner("2.32.0"))
+    assert ok and req.result == "applied"
+
+    req = _patch_request()
+    runner = _Runner("2.31.0")
+    ok, notes = apply_promotion(req, runner)
+    assert not ok and req.result == "failed"
+    assert "python3 -m pip install requests==2.31.0" in runner.ran  # rolled back
+
+
+def test_applied_promotion_cannot_be_reapplied():
+    from fnh.promote import PromotionRefused, apply_promotion
+    req = _patch_request(result="applied")
+    with pytest.raises(PromotionRefused):
+        apply_promotion(req, _Runner("2.32.0"))
+
+
+def test_repeat_runs_reuse_pending_promotion_request(tmp_path):
+    promoter = FilePromoter(tmp_path)
+    pipeline = Pipeline(
+        _Feed([Advisory("CVE-9", "t", "s", Severity.CRITICAL,
+                        affected=[{"ecosystem": "pypi", "name": "requests"}],
+                        vulnerable_ranges=["<2.32.0"], fixed_versions=["2.32.0"])]),
+        _Inv([Asset("prod", "requests", "package", ecosystem="pypi",
+                    version="2.31.0", environment="production")]),
+        Planner(), Executor(DryRunner()), SafetyPolicy(), promoter=promoter,
+    )
+    first = pipeline.run()[0]
+    second = pipeline.run()[0]
+    assert len(promoter.requests()) == 1
+    assert first.notes[-1] == second.notes[-1]

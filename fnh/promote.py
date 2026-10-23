@@ -19,6 +19,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from .executor import installed_version
+from .matcher import _cmp
 from .models import Outcome
 
 
@@ -31,10 +33,16 @@ class PromotionRequest:
     steps: list[str]
     rollback: list[str] = field(default_factory=list)
     verify: Optional[str] = None
+    # For patches: what to check after applying, since patches carry no probe.
+    ecosystem: Optional[str] = None
+    package: Optional[str] = None
+    target_version: Optional[str] = None
     created: str = field(default_factory=lambda: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     approved: bool = False
     approved_by: Optional[str] = None
+    # "applied" or "failed" once someone has run it.
+    result: Optional[str] = None
 
     @classmethod
     def from_outcome(cls, outcome: Outcome) -> "PromotionRequest":
@@ -47,6 +55,9 @@ class PromotionRequest:
             steps=list(rem.steps) if rem else [],
             rollback=list(rem.rollback) if rem else [],
             verify=rem.verify if rem else None,
+            ecosystem=outcome.match.asset.ecosystem,
+            package=outcome.match.asset.name,
+            target_version=rem.target_version if rem else None,
         )
 
     def to_dict(self) -> dict:
@@ -77,8 +88,15 @@ class FilePromoter(Promoter):
 
     def promote(self, outcome: Outcome) -> PromotionRequest:
         request = PromotionRequest.from_outcome(outcome)
+        # Scheduled runs find the same open issue every time; reuse the request
+        # that is still waiting instead of queuing a duplicate.
+        for existing in self.requests():
+            if existing.result is None and (
+                existing.advisory_id, existing.asset_id, existing.steps
+            ) == (request.advisory_id, request.asset_id, request.steps):
+                return existing
         self.directory.mkdir(parents=True, exist_ok=True)
-        self._path(request.id).write_text(json.dumps(request.to_dict(), indent=2))
+        self.save(request)
         return request
 
     def _path(self, request_id: str) -> Path:
@@ -112,14 +130,25 @@ class PromotionRefused(Exception):
 def apply_promotion(request: PromotionRequest, runner) -> tuple[bool, list[str]]:
     """Execute an APPROVED promotion request against production via `runner`.
 
-    Refuses outright unless `request.approved` is True. Runs the steps, then the
-    verify probe if present; on any failure it runs the rollback and reports.
+    Refuses unless `request.approved` is True and it hasn't already been
+    applied. Runs the steps, then checks the result (the verify probe for
+    mitigations, the installed version for patches); on any failure it runs
+    the rollback. Records the outcome on `request.result`.
     """
     if not request.approved:
         raise PromotionRefused(
             f"promotion {request.id} ({request.advisory_id} -> {request.asset_id}) "
             "is not approved; refusing to touch production"
         )
+    if request.result == "applied":
+        raise PromotionRefused(f"promotion {request.id} has already been applied")
+
+    ok, notes = _apply(request, runner)
+    request.result = "applied" if ok else "failed"
+    return ok, notes
+
+
+def _apply(request: PromotionRequest, runner) -> tuple[bool, list[str]]:
     notes: list[str] = []
     for step in request.steps:
         result = runner.run(step)
@@ -130,14 +159,23 @@ def apply_promotion(request: PromotionRequest, runner) -> tuple[bool, list[str]]
             return False, notes
 
     if request.verify:
-        result = runner.run(request.verify)
-        ok = result.ok
+        ok = runner.run(request.verify).ok
         notes.append(f"verify -> {'closed' if ok else 'STILL OPEN'}")
-        if not ok:
-            _rollback(request, runner, notes)
-            return False, notes
-
-    return True, notes
+    elif request.target_version and request.package:
+        installed = installed_version(request.ecosystem, request.package, runner)
+        ok = installed is not None and _cmp(
+            installed, request.target_version, request.ecosystem
+        ) >= 0
+        notes.append(
+            f"installed {request.package} {installed or 'unknown'}, "
+            f"need >= {request.target_version} -> {'ok' if ok else 'STILL OPEN'}"
+        )
+    else:
+        ok = True
+        notes.append("no verification available for this request")
+    if not ok:
+        _rollback(request, runner, notes)
+    return ok, notes
 
 
 def _rollback(request: PromotionRequest, runner, notes: list[str]) -> None:

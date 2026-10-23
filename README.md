@@ -114,8 +114,11 @@ fnh promote --promote-dir ./promotions --apply 3f1c9a2b7d10 --approve \
 ```
 
 Without `--approve`, `promote --apply` prints the steps and exits 1. With it,
-the steps run on the production host, then the verify probe, and the rollback
-runs if either fails.
+the steps run on the production host and the result is checked: the verify
+probe for mitigations, the installed version for patches. The rollback runs if
+either fails. The outcome is saved on the request, and an applied request
+can't be applied again. Repeated `fnh run`s reuse a pending request instead of
+queuing duplicates.
 
 ## Input formats
 
@@ -141,6 +144,10 @@ name such as `Debian:12`.
    "vulnerable_ranges": ["<2.32.0"], "fixed_versions": ["2.32.0"]}
 ]
 ```
+
+When an advisory covers several packages with different ranges, give each
+`affected` entry its own `"ranges"` and `"fixed"` lists; they override the
+advisory-wide ones for that package.
 
 ### Mitigation library
 
@@ -206,13 +213,13 @@ Defined in `fnh/safety.py`:
   OSV record.
 - Inventory entries with a generic `os` ecosystem are skipped for OSV lookups.
   Use a specific ecosystem like `Debian:12`.
-- Only ranges for the queried package are kept from multi-package advisories.
 - Live OSV queries need outbound HTTPS to `api.osv.dev`.
 
 ## Development
 
 ```bash
 pip install -e ".[dev]"
+python -m pyflakes fnh tests
 python -m pytest
 ```
 

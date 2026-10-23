@@ -1,6 +1,6 @@
 import pytest
 
-from fnh.executor import ChainValidator, CommandResult, DryRunner, Executor, VersionValidator, MitigationValidator
+from fnh.executor import CommandResult, DryRunner, Executor
 from fnh.feed import Feed
 from fnh.inventory import Inventory
 from fnh.models import Advisory, Asset, Severity
@@ -34,7 +34,7 @@ def _prod_pipeline(promoter):
     )
     asset = Asset("prod-req", "requests", "package", ecosystem="pypi",
                   version="2.31.0", environment="production")
-    executor = Executor(DryRunner(), ChainValidator([VersionValidator(), MitigationValidator()]))
+    executor = Executor(DryRunner())
     return Pipeline(
         feed=_Feed([advisory]), inventory=_Inv([asset]), planner=Planner(),
         executor=executor, policy=SafetyPolicy(), promoter=promoter,

@@ -11,11 +11,8 @@ third-party dependencies. Both HTTP transports (POST and GET) are injectable,
 so tests and dry-runs never touch the network, and an optional `OSVCache`
 avoids re-fetching records whose `modified` timestamp hasn't changed.
 
-Known simplification: our `Advisory` flattens vulnerable ranges into one list
-rather than keying them per affected package. Because we query OSV one package
-at a time and the matcher re-checks ecosystem+name before applying a range,
-this is safe for single-package advisories (the common case). Multi-package
-advisories keep only the ranges relevant to the queried package.
+Each affected package keeps its own ranges and fixed versions, so one record
+covering several packages matches each of them correctly.
 """
 
 from __future__ import annotations
@@ -24,7 +21,9 @@ import json
 import os
 import ssl
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
@@ -52,8 +51,6 @@ ECOSYSTEM_MAP = {
 
 PostTransport = Callable[[str, dict], dict]
 GetTransport = Callable[[str], dict]
-# Backwards-compatible alias (the POST transport was once the only one).
-Transport = PostTransport
 
 _SEVERITY_WORDS = {
     "LOW": Severity.LOW,
@@ -114,7 +111,9 @@ def _ssl_context() -> ssl.SSLContext:
     return ctx
 
 
+@lru_cache(maxsize=1)
 def _opener() -> urllib.request.OpenerDirector:
+    # Built once: loading the CA bundle is the expensive part.
     # ProxyHandler() with no args reads HTTP(S)_PROXY from the environment.
     return urllib.request.build_opener(
         urllib.request.ProxyHandler(),
@@ -200,7 +199,7 @@ def _best_cvss(record: dict) -> Optional[float]:
     return None
 
 
-def parse_osv_record(record: dict, queried_name: Optional[str] = None) -> Advisory:
+def parse_osv_record(record: dict) -> Advisory:
     """Parse one OSV vulnerability record into an Advisory."""
     cvss = _best_cvss(record)
     affected_out: list[dict] = []
@@ -208,15 +207,13 @@ def parse_osv_record(record: dict, queried_name: Optional[str] = None) -> Adviso
     fixed_out: list[str] = []
     for aff in record.get("affected", []):
         pkg = aff.get("package", {})
-        name = pkg.get("name")
-        # When querying a single package, keep only ranges for that package so
-        # the flattened range list stays meaningful.
-        if queried_name is not None and name is not None and name != queried_name:
-            continue
-        affected_out.append(
-            {"ecosystem": from_osv_ecosystem(pkg.get("ecosystem")), "name": name}
-        )
         ranges, fixed = _ranges_to_constraints(aff)
+        affected_out.append({
+            "ecosystem": from_osv_ecosystem(pkg.get("ecosystem")),
+            "name": pkg.get("name"),
+            "ranges": ranges,
+            "fixed": fixed,
+        })
         ranges_out.extend(ranges)
         fixed_out.extend(fixed)
 
@@ -245,8 +242,8 @@ def parse_osv_record(record: dict, queried_name: Optional[str] = None) -> Adviso
         published=published,
         source="osv",
         affected=affected_out,
-        # An "" entry means "all versions" (introduced:0 with no fix) and is
-        # honored as a match-all constraint by the matcher.
+        # Matching uses the per-package lists above; these are the union, kept
+        # for reporting. An "" range means "all versions".
         vulnerable_ranges=ranges_out,
         fixed_versions=sorted(set(fixed_out)),
         references=[r.get("url", "") for r in record.get("references", []) if r.get("url")],
@@ -292,17 +289,20 @@ class OSVCache:
 
 # Guard against a runaway pagination loop for a package with many advisories.
 _MAX_PAGES = 50
+# OSV rejects /v1/querybatch requests with more than 1000 queries.
+_BATCH_LIMIT = 1000
+# Concurrent /v1/vulns/{id} fetches. They're small, independent and I/O bound.
+_FETCH_WORKERS = 8
 
 
 class OSVFeed(Feed):
     """Query OSV for advisories affecting a fixed set of packages.
 
     Uses the batch endpoint (`/v1/querybatch`) to discover which advisories
-    touch each package in a single round trip. That endpoint returns only
-    `id` + `modified` per vuln, so full records are then fetched per id from
-    `/v1/vulns/{id}` — served from the cache when the `modified` timestamp is
-    unchanged. Set `batch=False` to fall back to per-package `/v1/query`
-    (full records, one request each).
+    touch each package. That endpoint returns only `id` + `modified` per vuln,
+    so full records are then fetched from `/v1/vulns/{id}` in parallel, served
+    from the cache when the `modified` timestamp is unchanged. Set
+    `batch=False` to fall back to one `/v1/query` per package (full records).
     """
 
     def __init__(
@@ -318,36 +318,48 @@ class OSVFeed(Feed):
         self.base_url = base_url.rstrip("/")
         self.cache = cache
         self.batch = batch
-        self._post: PostTransport = transport or (lambda url, payload: _http_post(url, payload))
-        self._get: GetTransport = get_transport or (lambda url: _http_get(url))
+        self._post: PostTransport = transport or _http_post
+        self._get: GetTransport = get_transport or _http_get
 
     def fetch(self) -> list[Advisory]:
-        advisories = self._fetch_batch() if self.batch else self._fetch_single()
+        records = self._fetch_batch() if self.batch else self._fetch_single()
         if self.cache is not None:
             self.cache.save()
-        return advisories
+        return [parse_osv_record(r) for r in records]
 
     # -- batch discovery + per-id detail (with caching) -------------------
 
-    def _fetch_batch(self) -> list[Advisory]:
-        if not self.packages:
-            return []
-        queries = [{"package": {"ecosystem": eco, "name": name}} for eco, name in self.packages]
-        resp = self._post(f"{self.base_url}/v1/querybatch", {"queries": queries})
-        results = resp.get("results", []) or []
+    def _fetch_batch(self) -> list[dict]:
+        # vuln id -> modified timestamp, across every package queried.
+        discovered: dict[str, Optional[str]] = {}
+        for start in range(0, len(self.packages), _BATCH_LIMIT):
+            chunk = self.packages[start:start + _BATCH_LIMIT]
+            queries = [{"package": {"ecosystem": eco, "name": name}} for eco, name in chunk]
+            resp = self._post(f"{self.base_url}/v1/querybatch", {"queries": queries})
+            for (eco, name), result in zip(chunk, resp.get("results", []) or []):
+                for vuln in self._paged_vulns(eco, name, result):
+                    discovered.setdefault(vuln["id"], vuln.get("modified"))
 
-        # Map each discovered vuln id -> (modified, the name we queried it under).
-        discovered: dict[str, tuple[Optional[str], str]] = {}
-        for (eco, name), result in zip(self.packages, results):
-            for vuln in self._paged_vulns(eco, name, result):
-                discovered.setdefault(vuln["id"], (vuln.get("modified"), name))
+        records: dict[str, dict] = {}
+        missing = []
+        for vuln_id, modified in discovered.items():
+            cached = self.cache.get(vuln_id, modified) if self.cache is not None else None
+            if cached is not None:
+                records[vuln_id] = cached
+            else:
+                missing.append(vuln_id)
 
-        advisories: dict[str, Advisory] = {}
-        for vuln_id, (modified, name) in discovered.items():
-            record = self._record(vuln_id, modified)
-            advisory = parse_osv_record(record, queried_name=name)
-            advisories.setdefault(advisory.id, advisory)
-        return list(advisories.values())
+        if missing:
+            with ThreadPoolExecutor(max_workers=min(_FETCH_WORKERS, len(missing))) as pool:
+                fetched = pool.map(
+                    lambda vid: self._get(f"{self.base_url}/v1/vulns/{vid}"), missing
+                )
+                for vuln_id, record in zip(missing, fetched):
+                    records[vuln_id] = record
+                    if self.cache is not None:
+                        self.cache.put(vuln_id, record.get("modified", discovered[vuln_id]), record)
+        # Keep discovery order so output is stable between runs.
+        return [records[vid] for vid in discovered]
 
     def _paged_vulns(self, eco: str, name: str, result: dict) -> list[dict]:
         """All (id, modified) vulns for one query, following pagination."""
@@ -364,30 +376,19 @@ class OSVFeed(Feed):
             token = page.get("next_page_token")
         return vulns
 
-    def _record(self, vuln_id: str, modified: Optional[str]) -> dict:
-        """Full OSV record for an id, from cache when the timestamp matches."""
-        if self.cache is not None:
-            cached = self.cache.get(vuln_id, modified)
-            if cached is not None:
-                return cached
-        record = self._get(f"{self.base_url}/v1/vulns/{vuln_id}")
-        if self.cache is not None:
-            self.cache.put(vuln_id, record.get("modified", modified), record)
-        return record
-
     # -- fallback: one full-record query per package ----------------------
 
-    def _fetch_single(self) -> list[Advisory]:
-        advisories: dict[str, Advisory] = {}
+    def _fetch_single(self) -> list[dict]:
+        records: dict[str, dict] = {}
         for ecosystem, name in self.packages:
             resp = self._post(
                 f"{self.base_url}/v1/query",
                 {"package": {"ecosystem": ecosystem, "name": name}},
             )
             for record in resp.get("vulns", []) or []:
-                # Full-record responses already carry `modified`; cache them too.
-                if self.cache is not None and record.get("id"):
+                if record.get("id") in records:
+                    continue
+                records[record["id"]] = record
+                if self.cache is not None:
                     self.cache.put(record["id"], record.get("modified"), record)
-                advisory = parse_osv_record(record, queried_name=name)
-                advisories.setdefault(advisory.id, advisory)
-        return list(advisories.values())
+        return list(records.values())

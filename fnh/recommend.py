@@ -7,7 +7,7 @@ produces concrete next-step recommendations instead of silently stopping.
 
 from __future__ import annotations
 
-from .models import Match, Outcome, OutcomeStatus, Remediation, RemediationKind
+from .models import Match, Outcome, Remediation, RemediationKind
 
 
 def recommendations_for(
@@ -17,7 +17,7 @@ def recommendations_for(
     adv = match.advisory
 
     if blocked_reason:
-        recs.append(f"Automation blocked ({blocked_reason}) — queue for human approval.")
+        recs.append(f"Automation blocked ({blocked_reason}). Review and apply by hand.")
 
     if remediation.kind == RemediationKind.NONE:
         recs.append("No fixed version is published yet. Track the advisory for a patch.")
@@ -27,22 +27,18 @@ def recommendations_for(
         )
         if adv.references:
             recs.append(f"Review upstream guidance: {adv.references[0]}")
-    elif remediation.kind == RemediationKind.MITIGATION and not validated:
-        recs.append(
-            "Mitigation did not hold on staging — do not apply to production. "
-            "Escalate to the owning team with the staging notes."
-        )
-    elif remediation.kind == RemediationKind.PATCH and not validated:
-        recs.append(
-            f"Patch to {remediation.target_version} failed validation on staging. "
-            "Inspect build/test logs before retrying."
-        )
-
-    if match.asset.environment == "production" and validated:
-        recs.append(
-            f"Staging validated. Schedule the change window to promote "
-            f"'{remediation.description}' to production."
-        )
+    elif not validated and not blocked_reason:
+        # Only report a failed validation when something actually ran.
+        if remediation.kind == RemediationKind.MITIGATION:
+            recs.append(
+                "Mitigation did not hold. Do not apply it to production; "
+                "escalate to the owning team with the notes above."
+            )
+        else:
+            recs.append(
+                f"Patch to {remediation.target_version} did not validate. "
+                "Check the step output above before retrying."
+            )
 
     return recs
 

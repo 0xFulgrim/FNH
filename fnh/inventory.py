@@ -180,9 +180,13 @@ class LiveInventory(Inventory):
         self.runner = runner
         self.collectors = collectors
         self.environment = environment
+        self._assets: list[Asset] | None = None
 
     def assets(self) -> list[Asset]:
-        out: list[Asset] = []
-        for collector in self.collectors:
-            out.extend(collector.collect(self.runner, self.environment))
-        return out
+        # Collected once per instance: a run reads the inventory twice (to pick
+        # OSV packages and to match), and each read is a round trip to the host.
+        if self._assets is None:
+            self._assets = []
+            for collector in self.collectors:
+                self._assets.extend(collector.collect(self.runner, self.environment))
+        return list(self._assets)

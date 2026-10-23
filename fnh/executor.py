@@ -1,16 +1,13 @@
-"""Stage 4 — apply on staging and validate.
+"""Stage 4 — apply a remediation and validate it.
 
-Flow for one match:
-  1. Apply the remediation steps on the *staging* copy of the asset.
-  2. Run a validator that checks whether the vulnerability is still present.
-     This is the authorized "does the fix actually hold?" check — a version
-     assertion and/or a safe reproduction probe against your own staging
-     service. If the gap is confirmed closed, the remediation is sound.
-  3. Nothing here ever touches production; promotion is a separate, gated
-     step (see pipeline + safety).
+For one match:
+  1. Run the remediation steps through a `CommandRunner` (staging by default).
+  2. Ask a validator whether the vulnerability is still present: a version
+     check for patches, the verify probe for mitigations.
+  3. Roll back if a step fails or validation doesn't confirm the fix.
 
 All command execution goes through `CommandRunner` so dry-run and tests never
-shell out.
+shell out. Production is only touched through an explicit production runner.
 """
 
 from __future__ import annotations
@@ -62,9 +59,12 @@ class ShellRunner(CommandRunner):
         self.timeout = timeout
 
     def run(self, command: str) -> CommandResult:
-        proc = subprocess.run(
-            command, shell=True, capture_output=True, text=True, timeout=self.timeout
-        )
+        try:
+            proc = subprocess.run(
+                command, shell=True, capture_output=True, text=True, timeout=self.timeout
+            )
+        except subprocess.TimeoutExpired:
+            return CommandResult(command, returncode=124, stderr="command timed out")
         return CommandResult(
             command=command,
             returncode=proc.returncode,
@@ -151,105 +151,88 @@ class Validator(ABC):
         raise NotImplementedError
 
 
+def installed_version(ecosystem: str | None, name: str, runner: CommandRunner) -> str | None:
+    """Version of `name` installed on the runner's host, or None if unknown."""
+    quoted = shlex.quote(name)
+    if ecosystem == "pypi":
+        r = runner.run(f"python3 -m pip show {quoted} | awk '/^Version:/ {{print $2}}'")
+    elif ecosystem == "npm":
+        r = runner.run(f"npm ls {quoted} --json --depth=0")
+        try:
+            deps = json.loads(r.stdout or "{}").get("dependencies", {}) or {}
+        except json.JSONDecodeError:
+            return None
+        return (deps.get(name) or {}).get("version")
+    elif is_apt_ecosystem(ecosystem):
+        r = runner.run(f"dpkg-query -W -f='${{Version}}' {quoted}")
+    else:
+        return None
+    if not r.ok:
+        return None
+    return r.stdout.strip() or None
+
+
 class VersionValidator(Validator):
     """For patches: confirm the installed version is now at/above the fix."""
 
     def is_closed(self, match: Match, remediation: Remediation, runner: CommandRunner) -> bool:
         if remediation.kind != RemediationKind.PATCH or not remediation.target_version:
-            # Nothing version-based to assert; defer to another validator.
             return False
         # Under dry-run there is no live target to query; assume the planned
         # version was installed so the flow validates end to end.
         if isinstance(runner, DryRunner):
             return True
-        installed = self._installed_version(match, runner)
+        eco = match.asset.ecosystem
+        installed = installed_version(eco, match.asset.name, runner)
         if installed is None:
             return False
-        return _cmp(installed, remediation.target_version, match.asset.ecosystem) >= 0
-
-    @staticmethod
-    def _installed_version(match: Match, runner: CommandRunner) -> str | None:
-        eco, name = match.asset.ecosystem, shlex.quote(match.asset.name)
-        if eco == "pypi":
-            r = runner.run(f"python3 -m pip show {name} | awk '/^Version:/ {{print $2}}'")
-        elif eco == "npm":
-            r = runner.run(f"npm ls {name} --json --depth=0")
-            try:
-                deps = json.loads(r.stdout or "{}").get("dependencies", {}) or {}
-            except json.JSONDecodeError:
-                return None
-            return (deps.get(match.asset.name) or {}).get("version")
-        elif is_apt_ecosystem(eco):
-            r = runner.run(f"dpkg-query -W -f='${{Version}}' {name}")
-        else:
-            return None
-        if not r.ok:
-            return None
-        return r.stdout.strip() or None
+        return _cmp(installed, remediation.target_version, eco) >= 0
 
 
 class MitigationValidator(Validator):
-    """For mitigations: run a `verify` probe against staging.
+    """For mitigations: run the remediation's `verify` probe.
 
-    A probe sends a safe, targeted request to your own staging service and
-    asserts the now-hardened response — a single command whose exit code is the
-    verdict (0 == closed). The command comes from the remediation itself (built
-    from the mitigation library's probe spec, see probes.py); a fallback probe
-    may be supplied to the constructor. Under a DryRunner there is nothing to
-    probe, so an applied mitigation is assumed to hold for reporting purposes.
-
-    `assume_closed_without_probe` controls the live-runner behavior when no
-    probe is configured: False (default, strict) refuses to claim closure it
-    cannot prove; True trusts the applied steps.
+    A probe is a single command whose exit code is the verdict (0 == closed),
+    built from the mitigation library's probe spec (see probes.py). Without a
+    probe, a live host is never reported as fixed. Under a DryRunner there is
+    nothing to probe, so an applied mitigation is assumed to hold.
     """
-
-    def __init__(
-        self,
-        verify_command: str | None = None,
-        assume_closed_without_probe: bool = False,
-    ):
-        self.verify_command = verify_command
-        self.assume_closed_without_probe = assume_closed_without_probe
 
     def is_closed(self, match: Match, remediation: Remediation, runner: CommandRunner) -> bool:
         if remediation.kind != RemediationKind.MITIGATION:
             return False
         if isinstance(runner, DryRunner):
             return True
-        probe = remediation.verify or self.verify_command
-        if not probe:
-            # No probe configured — only claim closure if explicitly trusted.
-            return self.assume_closed_without_probe
-        return runner.run(probe).ok
+        if not remediation.verify:
+            return False
+        return runner.run(remediation.verify).ok
 
 
-class ChainValidator(Validator):
-    """First validator that can speak to this remediation kind wins."""
+class DefaultValidator(Validator):
+    """Version check for patches, verify probe for mitigations."""
 
-    def __init__(self, validators: list[Validator]):
-        self.validators = validators
+    def __init__(self) -> None:
+        self._by_kind = {
+            RemediationKind.PATCH: VersionValidator(),
+            RemediationKind.MITIGATION: MitigationValidator(),
+        }
 
     def is_closed(self, match: Match, remediation: Remediation, runner: CommandRunner) -> bool:
-        patch_like = remediation.kind == RemediationKind.PATCH
-        for v in self.validators:
-            if patch_like and isinstance(v, VersionValidator):
-                return v.is_closed(match, remediation, runner)
-            if not patch_like and isinstance(v, MitigationValidator):
-                return v.is_closed(match, remediation, runner)
-        return False
+        validator = self._by_kind.get(remediation.kind)
+        return validator is not None and validator.is_closed(match, remediation, runner)
 
 
 class Executor:
     def __init__(
         self,
         runner: CommandRunner,
-        validator: Validator,
+        validator: Validator | None = None,
         production_runner: CommandRunner | None = None,
     ):
         # `runner` is the staging runner. Production assets are only acted on
         # directly when a separate production runner is supplied.
         self.runner = runner
-        self.validator = validator
+        self.validator = validator or DefaultValidator()
         self.production_runner = production_runner
 
     def runner_for(self, environment: str) -> CommandRunner | None:

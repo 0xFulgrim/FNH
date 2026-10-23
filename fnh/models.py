@@ -40,11 +40,13 @@ class Advisory:
     cvss: Optional[float] = None
     published: Optional[datetime] = None
     source: str = "unknown"
-    # Affected package coordinates, e.g. {"ecosystem": "pypi", "name": "requests"}.
+    # Affected packages, e.g. {"ecosystem": "pypi", "name": "requests"}. An entry
+    # may carry its own "ranges" and "fixed" lists, which then override the
+    # advisory-wide ones below for that package.
     affected: list[dict] = field(default_factory=list)
-    # Version ranges the advisory marks vulnerable, per affected package.
+    # Advisory-wide vulnerable ranges; empty means every version is affected.
     vulnerable_ranges: list[str] = field(default_factory=list)
-    # Versions that resolve the issue, if the advisory names any.
+    # Advisory-wide versions that resolve the issue.
     fixed_versions: list[str] = field(default_factory=list)
     references: list[str] = field(default_factory=list)
 
@@ -72,10 +74,14 @@ class Match:
     advisory: Advisory
     asset: Asset
     reason: str  # human-readable explanation of why it matched
+    # The `advisory.affected` entry that matched, when known.
+    affected: Optional[dict] = None
 
     @property
-    def key(self) -> str:
-        return f"{self.advisory.id}@{self.asset.id}"
+    def fixed_versions(self) -> list[str]:
+        if self.affected is not None and "fixed" in self.affected:
+            return self.affected["fixed"]
+        return self.advisory.fixed_versions
 
 
 class RemediationKind(str, Enum):
@@ -109,7 +115,6 @@ class OutcomeStatus(str, Enum):
     AWAITING_PROMOTION = "awaiting_promotion"  # validated on staging; prod change queued for approval
     NEEDS_REVIEW = "needs_review"  # no safe automated path; human action required
     FAILED = "failed"             # attempted remediation did not hold
-    SKIPPED = "skipped"
 
 
 @dataclass
